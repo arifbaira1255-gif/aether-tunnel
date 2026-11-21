@@ -156,7 +156,7 @@ object TunnelController {
             // rekeys every 2 minutes, so a healthy tunnel never shows an age above that.
             val handshakeAge = runCatching {
                 s.peers().firstOrNull()?.let { key ->
-                    val epoch = s.peer(key).latestHandshakeEpochMillis()
+                    val epoch = s.peer(key)?.latestHandshakeEpochMillis() ?: -1L
                     if (epoch > 0) now - epoch else -1L
                 } ?: -1L
             }.getOrElse { -1L }
