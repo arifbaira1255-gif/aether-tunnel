@@ -22,6 +22,7 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Upload
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -64,6 +65,7 @@ fun ConnectScreen(
 ) {
     val connected = app.state == TunnelState.CONNECTED
 
+    // Live session clock
     var elapsed by remember { mutableStateOf(0L) }
     LaunchedEffect(app.connectedAt, connected) {
         while (connected) {
@@ -81,6 +83,7 @@ fun ConnectScreen(
     ) {
         Spacer(Modifier.height(18.dp))
 
+        // ---- Header -------------------------------------------------------
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -109,6 +112,7 @@ fun ConnectScreen(
 
         Spacer(Modifier.height(26.dp))
 
+        // ---- Signature connect button -------------------------------------
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             ConnectButton(
                 state = app.state,
@@ -118,6 +122,7 @@ fun ConnectScreen(
 
         Spacer(Modifier.height(22.dp))
 
+        // ---- Session timer -------------------------------------------------
         Column(
             Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -137,6 +142,7 @@ fun ConnectScreen(
 
         Spacer(Modifier.height(24.dp))
 
+        // ---- Throughput ----------------------------------------------------
         GlassCard(Modifier.fillMaxWidth()) {
             Row(
                 Modifier
@@ -167,6 +173,7 @@ fun ConnectScreen(
 
         Spacer(Modifier.height(14.dp))
 
+        // ---- Current server row --------------------------------------------
         val profile = app.activeProfile ?: app.currentProfile()
         GlassCard(
             Modifier
@@ -207,6 +214,44 @@ fun ConnectScreen(
             }
         }
 
+        // ---- Failover progress ---------------------------------------------
+        app.failoverNote?.let { note ->
+            Spacer(Modifier.height(14.dp))
+            GlassCard(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (app.busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            color = Cyan,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(Mint))
+                    }
+                    Spacer(Modifier.width(11.dp))
+                    Column {
+                        Text(
+                            note,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = TextPrimary
+                        )
+                        if (app.attempts.isNotEmpty()) {
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                "${app.attempts.count { it.connected }} connected \u00b7 " +
+                                    "${app.attempts.size} endpoint(s) tried",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextTertiary
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(Modifier.height(14.dp))
 
         GlassCard(Modifier.fillMaxWidth()) {
@@ -227,7 +272,7 @@ fun ConnectScreen(
                     Spacer(Modifier.height(3.dp))
                     Text(
                         "Traffic is routed through the peer with the WireGuard protocol. " +
-                            "The first connection asks Android for VPN permission.",
+                            "SNI ${app.activeSni()} \u00b7 ${app.transport.endpointKey}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextTertiary
                     )

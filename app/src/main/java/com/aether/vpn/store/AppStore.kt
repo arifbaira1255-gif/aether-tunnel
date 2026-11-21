@@ -1,7 +1,10 @@
 package com.aether.vpn.store
 
 import android.content.Context
+import com.aether.vpn.core.Endpoint
 import com.aether.vpn.core.SessionRecord
+import com.aether.vpn.core.TransportCatalog
+import com.aether.vpn.core.TransportConfig
 import com.aether.vpn.core.TunnelProfile
 import com.aether.vpn.net.WarpApi
 import org.json.JSONArray
@@ -9,7 +12,7 @@ import org.json.JSONObject
 
 /**
  * On-device persistence: the WARP registration, the chosen edge, favourites,
- * session history and preferences. Plain SharedPreferences + JSON - no server,
+ * session history and preferences. Plain SharedPreferences + JSON — no server,
  * no account, nothing leaves the phone.
  */
 class AppStore(context: Context) {
@@ -110,6 +113,59 @@ class AppStore(context: Context) {
 
     fun clearSessions() = prefs.edit().remove(KEY_SESSIONS).apply()
 
+    // ---- transport config --------------------------------------------------
+
+    /** The SNI / payload / endpoint selection, persisted as one JSON blob. */
+    fun transport(): TransportConfig {
+        val raw = prefs.getString(KEY_TRANSPORT, null) ?: return TransportConfig()
+        return runCatching {
+            val o = JSONObject(raw)
+            TransportConfig(
+                sniId = o.optString("sniId", "cf-engage"),
+                payloadId = o.optString("payloadId", "pl-none"),
+                customSni = o.optString("customSni", ""),
+                customPayload = o.optString("customPayload", ""),
+                endpointKey = o.optString("endpointKey", "162.159.192.1:2408"),
+                autoFailover = o.optBoolean("autoFailover", true)
+            )
+        }.getOrElse { TransportConfig() }
+    }
+
+    fun saveTransport(config: TransportConfig) {
+        val o = JSONObject().apply {
+            put("sniId", config.sniId)
+            put("payloadId", config.payloadId)
+            put("customSni", config.customSni)
+            put("customPayload", config.customPayload)
+            put("endpointKey", config.endpointKey)
+            put("autoFailover", config.autoFailover)
+        }
+        prefs.edit().putString(KEY_TRANSPORT, o.toString()).apply()
+    }
+
+    /** The endpoint the user picked, resolved against the pool. */
+    fun selectedEndpoint(): Endpoint? {
+        val key = transport().endpointKey
+        return TransportCatalog.endpoints.firstOrNull { it.key == key }
+    }
+
+    // ---- probe results -----------------------------------------------------
+
+    /** Cached reachability, so the server list can show real latency without re-probing. */
+    fun probeResults(): Map<String, Long> {
+        val raw = prefs.getString(KEY_PROBES, null) ?: return emptyMap()
+        return runCatching {
+            val o = JSONObject(raw)
+            o.keys().asSequence().associateWith { o.getLong(it) }
+        }.getOrElse { emptyMap() }
+    }
+
+    fun saveProbeResults(results: Map<String, Long>) {
+        val o = JSONObject()
+        results.forEach { (k, v) -> o.put(k, v) }
+        prefs.edit().putString(KEY_PROBES, o.toString()).apply()
+    }
+
     // ---- preferences -------------------------------------------------------
 
     var autoConnect: Boolean
@@ -143,10 +199,7 @@ class AppStore(context: Context) {
     /** Applies the user's preferences on top of a base profile. */
     fun applyPreferences(base: TunnelProfile): TunnelProfile = base.copy(
         mtu = mtu,
-        dns = dns.split(",").map { it.trim() }.filter { it.isNotEmpty() },
-        sni = customSni.ifBlank { base.sni },
-        hostHeader = customHost.ifBlank { base.hostHeader },
-        payload = customPayload.ifBlank { null }
+        dns = dns.split(",").map { it.trim() }.filter { it.isNotEmpty() }
     )
 
     private companion object {
@@ -161,6 +214,8 @@ class AppStore(context: Context) {
         const val KEY_SNI = "sni"
         const val KEY_HOST = "host"
         const val KEY_PAYLOAD = "payload"
+        const val KEY_TRANSPORT = "transport_config"
+        const val KEY_PROBES = "probe_results"
         const val MAX_SESSIONS = 100
     }
 }

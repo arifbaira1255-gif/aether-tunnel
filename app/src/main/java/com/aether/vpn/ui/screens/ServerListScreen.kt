@@ -37,11 +37,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.aether.vpn.core.Endpoint
 import com.aether.vpn.ui.AppState
 import com.aether.vpn.ui.components.EmptyBlock
 import com.aether.vpn.ui.components.GlassCard
-import com.aether.vpn.ui.components.LoadBar
 import com.aether.vpn.ui.components.Pill
 import com.aether.vpn.ui.theme.Amber
 import com.aether.vpn.ui.theme.Cyan
@@ -52,72 +51,47 @@ import com.aether.vpn.ui.theme.TextSecondary
 import com.aether.vpn.ui.theme.TextTertiary
 import com.aether.vpn.ui.theme.Violet
 
-/** A row model for the edge list, derived from the real Cloudflare endpoints. */
-private data class EdgeRow(
-    val id: String,
-    val flag: String,
-    val country: String,
-    val city: String,
-    val host: String,
-    val port: Int,
-    val ping: Int,
-    val load: Int,
-    val tier: String
-)
-
-private val EDGE_META = listOf(
-    Triple("\uD83C\uDDFA\uD83C\uDDF8", "United States", "Ashburn"),
-    Triple("\uD83C\uDDFA\uD83C\uDDF8", "United States", "Los Angeles"),
-    Triple("\uD83C\uDDEC\uD83C\uDDE7", "United Kingdom", "London"),
-    Triple("\uD83C\uDDE9\uD83C\uDDEA", "Germany", "Frankfurt"),
-    Triple("\uD83C\uDDF3\uD83C\uDDF1", "Netherlands", "Amsterdam"),
-    Triple("\uD83C\uDDF8\uD83C\uDDEC", "Singapore", "Singapore"),
-    Triple("\uD83C\uDDEF\uD83C\uDDF5", "Japan", "Tokyo")
-)
-
+/**
+ * The endpoint list. Every row is a real Cloudflare WARP ingress address; the latency
+ * shown is the measured handshake round-trip from this device, and "not tested" means
+ * exactly that — nothing here is invented.
+ */
 @Composable
-fun ServerListScreen(app: AppState, onPick: (Int) -> Unit) {
+fun ServerListScreen(app: AppState, onPick: (Endpoint) -> Unit) {
     var query by remember { mutableStateOf("") }
     var onlyFavourites by remember { mutableStateOf(false) }
+    var onlyReachable by remember { mutableStateOf(false) }
 
-    val rows = remember(app.favourites.toList()) {
-        app.edges().mapIndexed { i, edge ->
-            val meta = EDGE_META.getOrElse(i) { Triple("\uD83C\uDF10", "Global", "Anycast") }
-            EdgeRow(
-                id = "edge-$i",
-                flag = meta.first,
-                country = meta.second,
-                city = meta.third,
-                host = edge.first,
-                port = edge.second,
-                ping = 18 + (i * 13) % 90,
-                load = 22 + (i * 17) % 62,
-                tier = if (i < 3) "FREE" else "PREMIUM"
-            )
-        }
-    }
+    val results = app.probeResults
+    val all = app.endpoints()
 
-    val filtered = rows.filter { r ->
+    val filtered = all.filter { e ->
         val matchesQuery = query.isBlank() ||
-            r.country.contains(query, true) ||
-            r.city.contains(query, true) ||
-            r.host.contains(query, true)
-        val matchesFav = !onlyFavourites || app.favourites.contains(r.id)
-        matchesQuery && matchesFav
-    }
+            e.host.contains(query, true) || e.port.toString().contains(query)
+        val matchesFav = !onlyFavourites || app.favourites.contains(e.key)
+        val matchesReachable = !onlyReachable || results.containsKey(e.key)
+        matchesQuery && matchesFav && matchesReachable
+    }.sortedWith(
+        compareBy(
+            { results[it.key] ?: Long.MAX_VALUE },
+            { if (it.port == 2408) 0 else 1 },
+            { it.host }
+        )
+    )
 
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         Spacer(Modifier.height(18.dp))
         Text("Servers", style = MaterialTheme.typography.headlineLarge, color = TextPrimary)
         Spacer(Modifier.height(3.dp))
         Text(
-            "${rows.size} Cloudflare edges \u00b7 free & unlimited",
+            "${all.size} WARP endpoints \u00b7 ${results.size} answered",
             style = MaterialTheme.typography.bodyMedium,
             color = TextTertiary
         )
 
         Spacer(Modifier.height(16.dp))
 
+        // Search field
         Box(
             Modifier
                 .fillMaxWidth()
@@ -132,7 +106,7 @@ fun ServerListScreen(app: AppState, onPick: (Int) -> Unit) {
                 Box(Modifier.weight(1f)) {
                     if (query.isEmpty()) {
                         Text(
-                            "Search country, city or host",
+                            "Search address or port",
                             style = MaterialTheme.typography.bodyLarge,
                             color = TextTertiary
                         )
@@ -152,8 +126,11 @@ fun ServerListScreen(app: AppState, onPick: (Int) -> Unit) {
         Spacer(Modifier.height(12.dp))
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip("All", !onlyFavourites) { onlyFavourites = false }
-            FilterChip("Favourites", onlyFavourites) { onlyFavourites = true }
+            FilterChip("All", !onlyFavourites && !onlyReachable) {
+                onlyFavourites = false; onlyReachable = false
+            }
+            FilterChip("Reachable", onlyReachable) { onlyReachable = !onlyReachable }
+            FilterChip("Favourites", onlyFavourites) { onlyFavourites = !onlyFavourites }
         }
 
         Spacer(Modifier.height(14.dp))
@@ -161,17 +138,21 @@ fun ServerListScreen(app: AppState, onPick: (Int) -> Unit) {
         if (filtered.isEmpty()) {
             EmptyBlock(
                 title = "No servers match",
-                body = "Try a different country or clear the search."
+                body = if (onlyReachable && results.isEmpty())
+                    "Nothing has been tested yet. Open Transport \u2192 Endpoints and tap Test all."
+                else "Try a different address or clear the filters."
             )
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(filtered, key = { it.id }) { row ->
+                items(filtered, key = { it.key }) { endpoint ->
                     ServerRow(
-                        row = row,
-                        selected = app.store.edgeIndex == rows.indexOf(row),
-                        favourite = app.favourites.contains(row.id),
-                        onFavourite = { app.toggleFavourite(row.id) },
-                        onClick = { onPick(rows.indexOf(row)) }
+                        endpoint = endpoint,
+                        latency = results[endpoint.key],
+                        tested = results.isNotEmpty(),
+                        selected = app.transport.endpointKey == endpoint.key,
+                        favourite = app.favourites.contains(endpoint.key),
+                        onFavourite = { app.toggleFavourite(endpoint.key) },
+                        onClick = { onPick(endpoint) }
                     )
                 }
                 item { Spacer(Modifier.height(24.dp)) }
@@ -200,7 +181,9 @@ private fun FilterChip(label: String, active: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun ServerRow(
-    row: EdgeRow,
+    endpoint: Endpoint,
+    latency: Long?,
+    tested: Boolean,
     selected: Boolean,
     favourite: Boolean,
     onFavourite: () -> Unit,
@@ -217,15 +200,27 @@ private fun ServerRow(
                 .padding(15.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Reachability dot
             Box(
                 Modifier
-                    .size(44.dp)
+                    .size(38.dp)
                     .clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.05f))
                     .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Text(row.flag, fontSize = 20.sp)
+                Box(
+                    Modifier
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                latency != null -> Mint
+                                tested -> Rose.copy(alpha = 0.55f)
+                                else -> TextTertiary.copy(alpha = 0.4f)
+                            }
+                        )
+                )
             }
 
             Spacer(Modifier.width(13.dp))
@@ -233,7 +228,7 @@ private fun ServerRow(
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        row.country,
+                        endpoint.host,
                         style = MaterialTheme.typography.titleMedium,
                         color = TextPrimary
                     )
@@ -244,36 +239,31 @@ private fun ServerRow(
                 }
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    "${row.city} \u00b7 ${row.host}",
+                    "UDP ${endpoint.port} \u00b7 ${endpoint.label}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextTertiary
                 )
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    LoadBar(row.load, Modifier.width(96.dp))
-                    Spacer(Modifier.width(9.dp))
-                    Text(
-                        "${row.load}%",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = TextTertiary
-                    )
-                }
             }
 
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    "${row.ping} ms",
+                    when {
+                        latency != null -> "$latency ms"
+                        tested -> "no reply"
+                        else -> "\u2014"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                     color = when {
-                        row.ping < 40 -> Mint
-                        row.ping < 80 -> Amber
+                        latency == null -> TextTertiary
+                        latency < 60 -> Mint
+                        latency < 150 -> Amber
                         else -> Rose
                     }
                 )
                 Spacer(Modifier.height(6.dp))
                 Pill(
-                    text = row.tier,
-                    color = if (row.tier == "FREE") Cyan else Violet
+                    text = if (endpoint.port == 2408) "PRIMARY" else "FALLBACK",
+                    color = if (endpoint.port == 2408) Cyan else Violet
                 )
                 Spacer(Modifier.height(6.dp))
                 Icon(

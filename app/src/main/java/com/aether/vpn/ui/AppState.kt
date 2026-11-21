@@ -5,10 +5,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.aether.vpn.core.Endpoint
 import com.aether.vpn.core.LiveStats
 import com.aether.vpn.core.SessionRecord
+import com.aether.vpn.core.TransportCatalog
+import com.aether.vpn.core.TransportConfig
 import com.aether.vpn.core.TunnelProfile
 import com.aether.vpn.core.TunnelState
+import com.aether.vpn.net.FailoverEngine
+import com.aether.vpn.net.TunnelProbe
 import com.aether.vpn.net.WarpApi
 import com.aether.vpn.service.TunnelController
 import com.aether.vpn.store.AppStore
@@ -19,7 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Single source of truth for the UI. Holds the WARP registration, the edge list,
+ * Single source of truth for the UI. Holds the WARP registration, the transport config,
  * the live tunnel state and the session history, and drives the stats poller.
  */
 class AppState(private val context: Context) {
@@ -40,6 +45,22 @@ class AppState(private val context: Context) {
     var connectedAt by mutableStateOf(0L)
         private set
 
+    /** The SNI / payload / endpoint selection. */
+    var transport by mutableStateOf(store.transport())
+        private set
+
+    /** Live failover progress, so the connect screen can show what it is trying. */
+    var failoverNote by mutableStateOf<String?>(null)
+        private set
+    var attempts by mutableStateOf<List<FailoverEngine.Attempt>>(emptyList())
+        private set
+
+    /** Cached endpoint reachability: endpoint key -> latency in ms. */
+    var probeResults by mutableStateOf(store.probeResults())
+        private set
+    var probing by mutableStateOf(false)
+        private set
+
     val sessions = mutableStateListOf<SessionRecord>()
     val favourites = mutableStateListOf<String>()
 
@@ -51,8 +72,8 @@ class AppState(private val context: Context) {
         favourites.addAll(store.favourites())
     }
 
-    /** The edge list the server screen shows, with real Cloudflare endpoints. */
-    fun edges(): List<Pair<String, Int>> = WarpApi.edgeList()
+    /** The endpoint pool the server screen shows. */
+    fun endpoints(): List<Endpoint> = TransportCatalog.endpoints
 
     fun refreshFromStore() {
         sessions.clear(); sessions.addAll(store.sessions())
@@ -63,6 +84,72 @@ class AppState(private val context: Context) {
         store.toggleFavourite(id)
         refreshFromStore()
     }
+
+    // ---- transport editing -------------------------------------------------
+
+    fun updateTransport(block: (TransportConfig) -> TransportConfig) {
+        val next = block(transport)
+        transport = next
+        store.saveTransport(next)
+    }
+
+    fun selectEndpoint(endpoint: Endpoint) {
+        updateTransport { it.copy(endpointKey = endpoint.key) }
+    }
+
+    fun selectSni(id: String) = updateTransport { it.copy(sniId = id, customSni = "") }
+
+    fun selectPayload(id: String) = updateTransport { it.copy(payloadId = id) }
+
+    fun setCustomSni(value: String) = updateTransport { it.copy(customSni = value) }
+
+    fun setCustomPayload(value: String) = updateTransport { it.copy(customPayload = value) }
+
+    fun setAutoFailover(value: Boolean) = updateTransport { it.copy(autoFailover = value) }
+
+    /** The SNI host currently in effect, for display. */
+    fun activeSni(): String = transport.effectiveSni
+
+    /** The rendered payload currently in effect, for display. */
+    fun activePayload(): String = TransportCatalog.renderPayload(
+        template = transport.effectivePayloadTemplate,
+        host = transport.effectiveSni,
+        port = 443,
+        sni = transport.effectiveSni
+    )
+
+    // ---- probing -----------------------------------------------------------
+
+    /**
+     * Probes the whole endpoint pool from this device and caches the results.
+     * Blocking work runs on IO; the UI shows [probing] while it happens.
+     */
+    fun probeAll(scope: CoroutineScope) {
+        if (probing) return
+        probing = true
+        scope.launch {
+            val results = withContext(Dispatchers.IO) {
+                TunnelProbe.probeAll(TransportCatalog.endpoints, timeoutMs = 900)
+            }
+            val reachable = results.filter { it.reachable }
+                .associate { it.endpoint.key to it.latencyMs }
+            probeResults = reachable
+            store.saveProbeResults(reachable)
+            probing = false
+            if (reachable.isEmpty()) {
+                error = "No endpoint answered from this network. UDP may be blocked here."
+            } else {
+                error = null
+                // Move the selection to the fastest endpoint that answered.
+                reachable.entries.minByOrNull { it.value }?.let { best ->
+                    TransportCatalog.endpoints.firstOrNull { it.key == best.key }
+                        ?.let { selectEndpoint(it) }
+                }
+            }
+        }
+    }
+
+    // ---- registration ------------------------------------------------------
 
     /** Registers a WARP device if we do not have one yet. */
     suspend fun ensureRegistration(): WarpApi.Registration? {
@@ -78,41 +165,71 @@ class AppState(private val context: Context) {
         }
     }
 
-    /** The profile the tunnel will use, with the user's preferences applied. */
+    /** The profile the tunnel would use right now, with preferences applied. */
     fun currentProfile(): TunnelProfile? {
         val reg = registration ?: return null
-        val base = WarpApi.profileFrom(reg, store.edgeIndex)
+        val endpoint = store.selectedEndpoint() ?: TransportCatalog.endpoints.first()
+        val base = WarpApi.profileFrom(reg, endpoint, transport)
         return store.applyPreferences(base)
     }
+
+    // ---- connect / disconnect ---------------------------------------------
 
     fun connect(scope: CoroutineScope) {
         if (busy) return
         busy = true
         error = null
+        attempts = emptyList()
+        failoverNote = null
         scope.launch {
             val reg = ensureRegistration()
             if (reg == null) {
                 busy = false
                 state = TunnelState.ERROR
+                failoverNote = null
                 return@launch
             }
-            val profile = currentProfile()
-            if (profile == null) {
-                busy = false
-                state = TunnelState.ERROR
-                return@launch
-            }
+
             state = TunnelState.CONNECTING
-            val result = withContext(Dispatchers.IO) {
-                runCatching { TunnelController.connect(context, profile) }
+            val preferred = store.selectedEndpoint()
+            val cfg = transport
+            val collected = ArrayList<FailoverEngine.Attempt>()
+
+            val outcome = withContext(Dispatchers.IO) {
+                FailoverEngine.run(
+                    config = cfg,
+                    preferred = preferred,
+                    buildProfile = { endpoint, transportCfg ->
+                        store.applyPreferences(WarpApi.profileFrom(reg, endpoint, transportCfg))
+                    },
+                    connect = { profile -> TunnelController.connect(context, profile) },
+                    disconnect = { runCatching { TunnelController.disconnect(context) } },
+                    maxAttempts = if (cfg.autoFailover) 12 else 1,
+                    onAttempt = { attempt -> collected.add(attempt) }
+                )
             }
-            result.onSuccess {
-                activeProfile = profile
+
+            // Publish the attempt log on the main thread, once.
+            attempts = collected.toList()
+            failoverNote = when {
+                outcome.connected && outcome.profile != null ->
+                    "Connected via ${outcome.profile.endpointLabel}"
+                collected.isNotEmpty() ->
+                    "Tried ${collected.size} endpoint(s) — none came up"
+                else -> null
+            }
+
+            if (outcome.connected && outcome.profile != null) {
+                activeProfile = outcome.profile
                 connectedAt = TunnelController.connectedSince()
                 state = TunnelState.CONNECTED
+                // Remember the endpoint that actually worked.
+                TransportCatalog.endpoints
+                    .firstOrNull { it.key == outcome.profile.endpointLabel }
+                    ?.let { selectEndpoint(it) }
                 startPolling(scope)
-            }.onFailure {
-                error = it.message ?: "Could not start the tunnel"
+            } else {
+                error = outcome.error
                 state = TunnelState.ERROR
             }
             busy = false
@@ -143,6 +260,7 @@ class AppState(private val context: Context) {
             activeProfile = null
             connectedAt = 0L
             stats = LiveStats()
+            failoverNote = null
             state = TunnelState.DISCONNECTED
             busy = false
         }

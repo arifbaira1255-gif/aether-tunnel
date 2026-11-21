@@ -1,6 +1,7 @@
 package com.aether.vpn
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -21,12 +22,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -50,17 +51,16 @@ import com.aether.vpn.ui.screens.ConnectScreen
 import com.aether.vpn.ui.screens.ServerListScreen
 import com.aether.vpn.ui.screens.SettingsScreen
 import com.aether.vpn.ui.screens.StatsScreen
+import com.aether.vpn.ui.screens.TransportScreen
 import com.aether.vpn.ui.theme.AetherTheme
 import com.aether.vpn.ui.theme.Cyan
 import com.aether.vpn.ui.theme.Mint
 import com.aether.vpn.ui.theme.TextTertiary
 import com.aether.vpn.ui.theme.Violet
-import kotlinx.coroutines.CoroutineScope
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var app: AppState
-    private var pendingConnect: (() -> Unit)? = null
 
     private val vpnPermission = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -72,6 +72,8 @@ class MainActivity : ComponentActivity() {
         }
         pendingConnect = null
     }
+
+    private var pendingConnect: (() -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,11 +102,12 @@ class MainActivity : ComponentActivity() {
                                     onConnect = { requestConnect(scope) },
                                     onDisconnect = { app.disconnect(scope) }
                                 )
-                                1 -> ServerListScreen(app) { index ->
-                                    app.store.edgeIndex = index
+                                1 -> ServerListScreen(app) { endpoint ->
+                                    app.selectEndpoint(endpoint)
                                     tab = 0
                                 }
-                                2 -> StatsScreen(app)
+                                2 -> TransportScreen(app)
+                                3 -> StatsScreen(app)
                                 else -> SettingsScreen(app)
                             }
                         }
@@ -115,7 +118,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestConnect(scope: CoroutineScope) {
+    private fun requestConnect(scope: kotlinx.coroutines.CoroutineScope) {
         val consent = TunnelController.prepare(this)
         if (consent != null) {
             pendingConnect = { app.connect(scope) }
@@ -131,8 +134,9 @@ private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
     val items = listOf(
         Triple("Connect", Icons.Rounded.Shield, 0),
         Triple("Servers", Icons.Rounded.Dns, 1),
-        Triple("Usage", Icons.Rounded.BarChart, 2),
-        Triple("Settings", Icons.Rounded.Settings, 3)
+        Triple("Transport", Icons.Rounded.Tune, 2),
+        Triple("Usage", Icons.Rounded.BarChart, 3),
+        Triple("Settings", Icons.Rounded.Settings, 4)
     )
 
     Box(
@@ -144,19 +148,23 @@ private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(22.dp))
+                .clip(androidx.compose.foundation.shape.RoundedCornerShape(22.dp))
                 .background(Color(0xFF0C0F22).copy(alpha = 0.94f))
-                .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(22.dp))
+                .border(
+                    1.dp,
+                    Color.White.copy(alpha = 0.07f),
+                    androidx.compose.foundation.shape.RoundedCornerShape(22.dp)
+                )
                 .padding(vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            items.forEach { item ->
+            items.forEach { (label, icon, index) ->
                 TabItem(
-                    label = item.first,
-                    icon = item.second,
-                    active = selected == item.third,
-                    onClick = { onSelect(item.third) }
+                    label = label,
+                    icon = icon,
+                    active = selected == index,
+                    onClick = { onSelect(index) }
                 )
             }
         }
@@ -172,9 +180,9 @@ private fun TabItem(
 ) {
     Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(

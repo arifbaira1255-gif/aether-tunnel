@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.aether.vpn.core.TransportCatalog
 import com.aether.vpn.ui.AppState
 import com.aether.vpn.ui.components.GlassCard
 import com.aether.vpn.ui.components.Pill
@@ -49,9 +50,6 @@ fun SettingsScreen(app: AppState) {
     var killSwitch by remember { mutableStateOf(store.killSwitch) }
     var mtu by remember { mutableStateOf(store.mtu.toString()) }
     var dns by remember { mutableStateOf(store.dns) }
-    var sni by remember { mutableStateOf(store.customSni) }
-    var host by remember { mutableStateOf(store.customHost) }
-    var payload by remember { mutableStateOf(store.customPayload) }
 
     Column(
         Modifier
@@ -80,7 +78,7 @@ fun SettingsScreen(app: AppState) {
                     checked = autoConnect
                 ) { autoConnect = it; store.autoConnect = it }
 
-                Hairline()
+                Divider()
 
                 ToggleRow(
                     title = "Kill switch",
@@ -91,7 +89,38 @@ fun SettingsScreen(app: AppState) {
         }
 
         Spacer(Modifier.height(20.dp))
-        SectionLabel("Advanced \u00b7 payload, SNI & host")
+        SectionLabel("Transport \u00b7 SNI, payload & endpoints")
+        Spacer(Modifier.height(10.dp))
+
+        GlassCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                AboutRow("SNI host", app.activeSni())
+                Spacer(Modifier.height(10.dp))
+                AboutRow(
+                    "Payload",
+                    TransportCatalog.payloadById(app.transport.payloadId)?.name ?: "Custom"
+                )
+                Spacer(Modifier.height(10.dp))
+                AboutRow("Endpoint", app.transport.endpointKey)
+                Spacer(Modifier.height(10.dp))
+                AboutRow(
+                    "Auto-failover",
+                    if (app.transport.autoFailover) "On" else "Off"
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Open the Transport tab to pick from " +
+                        "${TransportCatalog.sniHosts.size} SNI hosts, " +
+                        "${TransportCatalog.payloads.size} payload templates " +
+                        "and ${TransportCatalog.endpoints.size} endpoints.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextTertiary
+                )
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        SectionLabel("Tunnel")
         Spacer(Modifier.height(10.dp))
 
         GlassCard(Modifier.fillMaxWidth()) {
@@ -99,12 +128,6 @@ fun SettingsScreen(app: AppState) {
                 FieldRow("MTU", mtu, "1280") { mtu = it; store.mtu = it.toIntOrNull() ?: 1280 }
                 Spacer(Modifier.height(14.dp))
                 FieldRow("DNS", dns, "1.1.1.1, 1.0.0.1") { dns = it; store.dns = it }
-                Spacer(Modifier.height(14.dp))
-                FieldRow("SNI", sni, "engage.cloudflareclient.com") { sni = it; store.customSni = it }
-                Spacer(Modifier.height(14.dp))
-                FieldRow("Host header", host, "engage.cloudflareclient.com") { host = it; store.customHost = it }
-                Spacer(Modifier.height(14.dp))
-                FieldRow("Payload", payload, "optional handshake payload") { payload = it; store.customPayload = it }
             }
         }
 
@@ -144,11 +167,13 @@ fun SettingsScreen(app: AppState) {
             Column(Modifier.padding(16.dp)) {
                 AboutRow("App", "Aether Tunnel")
                 Spacer(Modifier.height(10.dp))
-                AboutRow("Version", "1.0.0")
+                AboutRow("Version", "1.1.0")
                 Spacer(Modifier.height(10.dp))
                 AboutRow("Server source", "Cloudflare WARP (free, unlimited)")
                 Spacer(Modifier.height(10.dp))
                 AboutRow("Tunnel", "Real WireGuard via Android VpnService")
+                Spacer(Modifier.height(10.dp))
+                AboutRow("Endpoints", "${TransportCatalog.endpoints.size} in the pool")
             }
         }
 
@@ -238,7 +263,7 @@ private fun AboutRow(label: String, value: String) {
 }
 
 @Composable
-private fun Hairline() {
+private fun Divider() {
     Box(
         Modifier
             .fillMaxWidth()

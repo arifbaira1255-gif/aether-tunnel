@@ -21,6 +21,8 @@ data class TunnelProfile(
     val sni: String? = null,
     val hostHeader: String? = null,
     val payload: String? = null,
+    val sniId: String? = null,
+    val payloadId: String? = null,
     val isCustom: Boolean = false
 ) {
     enum class Tier { FREE, PREMIUM }
@@ -39,7 +41,42 @@ data class TunnelProfile(
         appendLine("AllowedIPs = ${allowedIps.joinToString(", ")}")
         appendLine("Endpoint = $endpointHost:$endpointPort")
         appendLine("PersistentKeepalive = $persistentKeepalive")
+        // Transport hints are not part of the WireGuard spec, so they go in comments:
+        // a stock wg-quick still parses the file, and a TLS-wrapping relay can read them.
+        sni?.let { appendLine("# SNI = $it") }
+        hostHeader?.let { appendLine("# Host = $it") }
+        payload?.takeIf { it.isNotBlank() }?.let {
+            appendLine("# Payload = ${it.replace("\r\n", "\\n")}")
+        }
     }
+
+    /** Short "host:port" for the UI. */
+    val endpointLabel: String get() = "$endpointHost:$endpointPort"
+}
+
+/**
+ * The transport settings the user picked: which SNI host, which payload template and
+ * which endpoint. Kept separate from [TunnelProfile] so the UI can show and edit them
+ * without a live registration.
+ */
+data class TransportConfig(
+    val sniId: String = "cf-engage",
+    val payloadId: String = "pl-none",
+    val customSni: String = "",
+    val customPayload: String = "",
+    val endpointKey: String = "162.159.192.1:2408",
+    val autoFailover: Boolean = true
+) {
+    /** The SNI actually used: the custom one wins when it is set. */
+    val effectiveSni: String
+        get() = customSni.ifBlank {
+            TransportCatalog.sniById(sniId)?.host ?: "engage.cloudflareclient.com"
+        }
+
+    /** The payload template actually used. */
+    val effectivePayloadTemplate: String
+        get() = if (payloadId == "pl-custom") customPayload
+        else TransportCatalog.payloadById(payloadId)?.template ?: ""
 }
 
 /** One finished connection, kept for the stats screen. */

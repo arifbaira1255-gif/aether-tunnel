@@ -1,5 +1,8 @@
 package com.aether.vpn.net
 
+import com.aether.vpn.core.Endpoint
+import com.aether.vpn.core.TransportCatalog
+import com.aether.vpn.core.TransportConfig
 import com.aether.vpn.core.TunnelProfile
 import com.wireguard.crypto.KeyPair
 import org.json.JSONObject
@@ -15,7 +18,7 @@ import java.util.TimeZone
 /**
  * Registers a free, unlimited Cloudflare WARP account and turns the response into a
  * real WireGuard profile. This is the app's server source: no third-party VPN reseller,
- * no API key, no account of ours in the middle - the device talks straight to
+ * no API key, no account of ours in the middle — the device talks straight to
  * Cloudflare's WireGuard edge.
  *
  * The registration is done once per device and cached; the resulting keypair and
@@ -48,7 +51,7 @@ object WarpApi {
     )
 
     /**
-     * Registers a new WARP device. Blocking - call from a background dispatcher.
+     * Registers a new WARP device. Blocking — call from a background dispatcher.
      * @throws Exception when the network is unavailable or Cloudflare refuses.
      */
     fun register(): Registration {
@@ -106,16 +109,26 @@ object WarpApi {
     }
 
     /** Builds the profile the tunnel will use from a registration. */
-    fun profileFrom(reg: Registration, endpointIndex: Int = 0): TunnelProfile {
-        val (host, port) = ENDPOINTS[endpointIndex.coerceIn(0, ENDPOINTS.lastIndex)]
+    fun profileFrom(
+        reg: Registration,
+        endpoint: Endpoint = TransportCatalog.endpoints.first(),
+        transport: TransportConfig = TransportConfig()
+    ): TunnelProfile {
+        val sni = transport.effectiveSni
+        val payload = TransportCatalog.renderPayload(
+            template = transport.effectivePayloadTemplate,
+            host = sni,
+            port = 443,
+            sni = sni
+        ).ifBlank { null }
         return TunnelProfile(
             id = "warp-auto",
             name = "Aether Auto",
             country = "Global",
             city = "Anycast edge",
             flag = "\uD83C\uDF10",
-            endpointHost = host,
-            endpointPort = port,
+            endpointHost = endpoint.host,
+            endpointPort = endpoint.port,
             peerPublicKey = reg.peerPublicKey,
             privateKey = reg.privateKey,
             addressV4 = "${reg.addressV4}/32",
@@ -125,8 +138,11 @@ object WarpApi {
             allowedIps = listOf("0.0.0.0/0", "::/0"),
             persistentKeepalive = 25,
             tier = TunnelProfile.Tier.FREE,
-            sni = "engage.cloudflareclient.com",
-            hostHeader = "engage.cloudflareclient.com"
+            sni = sni,
+            hostHeader = sni,
+            payload = payload,
+            sniId = transport.sniId,
+            payloadId = transport.payloadId
         )
     }
 
