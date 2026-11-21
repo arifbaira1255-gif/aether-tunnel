@@ -1,0 +1,3 @@
+-keep class com.wireguard.** { *; }
+-keep class com.aether.vpn.** { *; }
+-dontwarn com.wireguard.**
