@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BarChart
@@ -43,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.aether.vpn.core.TunnelState
 import com.aether.vpn.service.TunnelController
 import com.aether.vpn.ui.AppState
@@ -57,6 +59,7 @@ import com.aether.vpn.ui.theme.Cyan
 import com.aether.vpn.ui.theme.Mint
 import com.aether.vpn.ui.theme.TextTertiary
 import com.aether.vpn.ui.theme.Violet
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -99,6 +102,7 @@ class MainActivity : ComponentActivity() {
                                 0 -> ConnectScreen(
                                     app = app,
                                     onOpenServers = { tab = 1 },
+                                    onOpenTransport = { tab = 2 },
                                     onConnect = { requestConnect(scope) },
                                     onDisconnect = { app.disconnect(scope) }
                                 )

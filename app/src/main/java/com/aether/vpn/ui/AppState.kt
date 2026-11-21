@@ -5,9 +5,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.aether.vpn.core.Carrier
 import com.aether.vpn.core.Endpoint
 import com.aether.vpn.core.LiveStats
 import com.aether.vpn.core.SessionRecord
+import com.aether.vpn.core.SpeedHistory
 import com.aether.vpn.core.TransportCatalog
 import com.aether.vpn.core.TransportConfig
 import com.aether.vpn.core.TunnelProfile
@@ -61,10 +63,20 @@ class AppState(private val context: Context) {
     var probing by mutableStateOf(false)
         private set
 
+    /** Rolling throughput window for the live graph. */
+    val speed = SpeedHistory(60)
+    var speedTick by mutableStateOf(0L)
+        private set
+
+    /** The MTU the current session came up on, 0 when not connected. */
+    var activeMtu by mutableStateOf(0)
+        private set
+
     val sessions = mutableStateListOf<SessionRecord>()
     val favourites = mutableStateListOf<String>()
 
     private var pollJob: kotlinx.coroutines.Job? = null
+    private var watchdogJob: kotlinx.coroutines.Job? = null
 
     init {
         registration = store.registration()
@@ -106,6 +118,30 @@ class AppState(private val context: Context) {
     fun setCustomPayload(value: String) = updateTransport { it.copy(customPayload = value) }
 
     fun setAutoFailover(value: Boolean) = updateTransport { it.copy(autoFailover = value) }
+
+    fun setAutoMtu(value: Boolean) = updateTransport { it.copy(autoMtu = value) }
+
+    fun setWatchdog(value: Boolean) = updateTransport { it.copy(watchdog = value) }
+
+    fun setDnsPreset(id: String) {
+        updateTransport { it.copy(dnsId = id) }
+        TransportCatalog.dnsById(id)?.let { store.dns = it.servers.joinToString(", ") }
+    }
+
+    /**
+     * Switches the whole transport profile to a carrier: its SNI host, its payload and
+     * its DNS. This is the one-tap "I am on Jazz" action.
+     */
+    fun selectCarrier(carrier: Carrier) {
+        updateTransport {
+            it.copy(
+                carrier = carrier,
+                sniId = carrier.defaultSniId,
+                payloadId = carrier.defaultPayloadId,
+                customSni = ""
+            )
+        }
+    }
 
     /** The SNI host currently in effect, for display. */
     fun activeSni(): String = transport.effectiveSni
@@ -169,7 +205,7 @@ class AppState(private val context: Context) {
     fun currentProfile(): TunnelProfile? {
         val reg = registration ?: return null
         val endpoint = store.selectedEndpoint() ?: TransportCatalog.endpoints.first()
-        val base = WarpApi.profileFrom(reg, endpoint, transport)
+        val base = WarpApi.profileFrom(reg, endpoint, transport, store.mtu)
         return store.applyPreferences(base)
     }
 
@@ -180,7 +216,7 @@ class AppState(private val context: Context) {
         busy = true
         error = null
         attempts = emptyList()
-        failoverNote = null
+        failoverNote = "Registering with the WARP edge\u2026"
         scope.launch {
             val reg = ensureRegistration()
             if (reg == null) {
@@ -191,6 +227,7 @@ class AppState(private val context: Context) {
             }
 
             state = TunnelState.CONNECTING
+            failoverNote = "Probing endpoints\u2026"
             val preferred = store.selectedEndpoint()
             val cfg = transport
             val collected = ArrayList<FailoverEngine.Attempt>()
@@ -199,8 +236,13 @@ class AppState(private val context: Context) {
                 FailoverEngine.run(
                     config = cfg,
                     preferred = preferred,
-                    buildProfile = { endpoint, transportCfg ->
-                        store.applyPreferences(WarpApi.profileFrom(reg, endpoint, transportCfg))
+                    lastGoodMtu = store.lastGoodMtu,
+                    fixedMtu = store.mtu,
+                    buildProfile = { endpoint, transportCfg, mtu ->
+                        store.applyPreferences(
+                            WarpApi.profileFrom(reg, endpoint, transportCfg, mtu),
+                            mtu
+                        )
                     },
                     connect = { profile -> TunnelController.connect(context, profile) },
                     disconnect = { runCatching { TunnelController.disconnect(context) } },
@@ -213,21 +255,26 @@ class AppState(private val context: Context) {
             attempts = collected.toList()
             failoverNote = when {
                 outcome.connected && outcome.profile != null ->
-                    "Connected via ${outcome.profile.endpointLabel}"
+                    "Connected via ${outcome.profile.endpointLabel} \u00b7 MTU ${outcome.mtu}"
                 collected.isNotEmpty() ->
-                    "Tried ${collected.size} endpoint(s) — none came up"
+                    "Tried ${collected.size} combination(s) \u2014 none came up"
                 else -> null
             }
 
             if (outcome.connected && outcome.profile != null) {
                 activeProfile = outcome.profile
+                activeMtu = outcome.mtu
                 connectedAt = TunnelController.connectedSince()
                 state = TunnelState.CONNECTED
-                // Remember the endpoint that actually worked.
+                // Remember what actually worked, so the next connect is instant.
+                store.lastGoodMtu = outcome.mtu
+                store.mtu = outcome.mtu
                 TransportCatalog.endpoints
                     .firstOrNull { it.key == outcome.profile.endpointLabel }
                     ?.let { selectEndpoint(it) }
+                speed.clear()
                 startPolling(scope)
+                if (cfg.watchdog) startWatchdog(scope)
             } else {
                 error = outcome.error
                 state = TunnelState.ERROR
@@ -243,8 +290,11 @@ class AppState(private val context: Context) {
             state = TunnelState.DISCONNECTING
             val started = connectedAt
             val finalStats = stats
+            val mtu = activeMtu
+            val endpoint = activeProfile?.endpointLabel ?: ""
             withContext(Dispatchers.IO) { runCatching { TunnelController.disconnect(context) } }
             stopPolling()
+            stopWatchdog()
             if (started > 0) {
                 val rec = SessionRecord(
                     profileName = activeProfile?.name ?: "Aether Auto",
@@ -252,14 +302,18 @@ class AppState(private val context: Context) {
                     startedAt = started,
                     endedAt = System.currentTimeMillis(),
                     rxBytes = finalStats.rxBytes,
-                    txBytes = finalStats.txBytes
+                    txBytes = finalStats.txBytes,
+                    mtu = mtu,
+                    endpoint = endpoint
                 )
                 store.addSession(rec)
                 refreshFromStore()
             }
             activeProfile = null
+            activeMtu = 0
             connectedAt = 0L
             stats = LiveStats()
+            speed.clear()
             failoverNote = null
             state = TunnelState.DISCONNECTED
             busy = false
@@ -272,7 +326,10 @@ class AppState(private val context: Context) {
             while (true) {
                 delay(1000)
                 withContext(Dispatchers.IO) { TunnelController.pollStats(context) }
-                stats = TunnelController.stats.value
+                val s = TunnelController.stats.value
+                stats = s
+                speed.push(s.downBps, s.upBps)
+                speedTick = System.currentTimeMillis()
                 state = TunnelController.state.value
                 if (state == TunnelState.DISCONNECTED) break
             }
@@ -284,9 +341,40 @@ class AppState(private val context: Context) {
         pollJob = null
     }
 
+    /**
+     * Reconnects when the tunnel claims to be up but nothing is moving. This is the
+     * difference between "connected" and "actually working" on a flaky mobile network.
+     */
+    private fun startWatchdog(scope: CoroutineScope) {
+        stopWatchdog()
+        watchdogJob = scope.launch {
+            while (true) {
+                delay(15_000)
+                if (state != TunnelState.CONNECTED) break
+                if (TunnelController.looksStalled()) {
+                    failoverNote = "Tunnel stalled \u2014 reconnecting\u2026"
+                    withContext(Dispatchers.IO) { runCatching { TunnelController.disconnect(context) } }
+                    stopPolling()
+                    state = TunnelState.DISCONNECTED
+                    busy = false
+                    connect(scope)
+                    break
+                }
+            }
+        }
+    }
+
+    private fun stopWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = null
+    }
+
     // ---- lifetime totals ---------------------------------------------------
 
     fun lifetimeRx(): Long = sessions.sumOf { it.rxBytes }
     fun lifetimeTx(): Long = sessions.sumOf { it.txBytes }
     fun lifetimeMs(): Long = sessions.sumOf { it.durationMs }
+
+    /** The best measured latency in the pool, or null when nothing has been probed. */
+    fun bestLatency(): Long? = probeResults.values.minOrNull()
 }

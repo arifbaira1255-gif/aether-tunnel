@@ -1,6 +1,7 @@
 package com.aether.vpn.store
 
 import android.content.Context
+import com.aether.vpn.core.Carrier
 import com.aether.vpn.core.Endpoint
 import com.aether.vpn.core.SessionRecord
 import com.aether.vpn.core.TransportCatalog
@@ -51,6 +52,8 @@ class AppStore(context: Context) {
         prefs.edit().putString(KEY_REG, o.toString()).apply()
     }
 
+    fun clearRegistration() = prefs.edit().remove(KEY_REG).apply()
+
     // ---- chosen edge -------------------------------------------------------
 
     var edgeIndex: Int
@@ -87,7 +90,9 @@ class AppStore(context: Context) {
                     startedAt = o.getLong("start"),
                     endedAt = o.getLong("end"),
                     rxBytes = o.getLong("rx"),
-                    txBytes = o.getLong("tx")
+                    txBytes = o.getLong("tx"),
+                    mtu = o.optInt("mtu", 0),
+                    endpoint = o.optString("endpoint", "")
                 )
             }
         }.getOrElse { emptyList() }
@@ -106,6 +111,8 @@ class AppStore(context: Context) {
                 put("end", r.endedAt)
                 put("rx", r.rxBytes)
                 put("tx", r.txBytes)
+                put("mtu", r.mtu)
+                put("endpoint", r.endpoint)
             })
         }
         prefs.edit().putString(KEY_SESSIONS, arr.toString()).apply()
@@ -126,7 +133,13 @@ class AppStore(context: Context) {
                 customSni = o.optString("customSni", ""),
                 customPayload = o.optString("customPayload", ""),
                 endpointKey = o.optString("endpointKey", "162.159.192.1:2408"),
-                autoFailover = o.optBoolean("autoFailover", true)
+                autoFailover = o.optBoolean("autoFailover", true),
+                carrier = runCatching {
+                    Carrier.valueOf(o.optString("carrier", Carrier.AUTO.name))
+                }.getOrElse { Carrier.AUTO },
+                autoMtu = o.optBoolean("autoMtu", true),
+                watchdog = o.optBoolean("watchdog", true),
+                dnsId = o.optString("dnsId", "dns-cf")
             )
         }.getOrElse { TransportConfig() }
     }
@@ -139,6 +152,10 @@ class AppStore(context: Context) {
             put("customPayload", config.customPayload)
             put("endpointKey", config.endpointKey)
             put("autoFailover", config.autoFailover)
+            put("carrier", config.carrier.name)
+            put("autoMtu", config.autoMtu)
+            put("watchdog", config.watchdog)
+            put("dnsId", config.dnsId)
         }
         prefs.edit().putString(KEY_TRANSPORT, o.toString()).apply()
     }
@@ -196,9 +213,20 @@ class AppStore(context: Context) {
         get() = prefs.getString(KEY_PAYLOAD, "") ?: ""
         set(v) = prefs.edit().putString(KEY_PAYLOAD, v).apply()
 
+    /** The MTU that last produced a working tunnel, so the next connect starts there. */
+    var lastGoodMtu: Int
+        get() = prefs.getInt(KEY_GOOD_MTU, 0)
+        set(v) = prefs.edit().putInt(KEY_GOOD_MTU, v).apply()
+
     /** Applies the user's preferences on top of a base profile. */
     fun applyPreferences(base: TunnelProfile): TunnelProfile = base.copy(
         mtu = mtu,
+        dns = dns.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    )
+
+    /** Applies preferences with an explicit MTU, used by the MTU ladder. */
+    fun applyPreferences(base: TunnelProfile, mtuOverride: Int): TunnelProfile = base.copy(
+        mtu = mtuOverride,
         dns = dns.split(",").map { it.trim() }.filter { it.isNotEmpty() }
     )
 
@@ -216,6 +244,7 @@ class AppStore(context: Context) {
         const val KEY_PAYLOAD = "payload"
         const val KEY_TRANSPORT = "transport_config"
         const val KEY_PROBES = "probe_results"
+        const val KEY_GOOD_MTU = "last_good_mtu"
         const val MAX_SESSIONS = 100
     }
 }

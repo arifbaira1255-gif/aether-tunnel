@@ -108,11 +108,17 @@ object WarpApi {
         }
     }
 
-    /** Builds the profile the tunnel will use from a registration. */
+    /**
+     * Builds the profile the tunnel will use from a registration.
+     *
+     * @param mtu the MTU for this attempt. The failover engine walks the ladder, so this
+     *        is not a constant — it is whatever value is being tried right now.
+     */
     fun profileFrom(
         reg: Registration,
         endpoint: Endpoint = TransportCatalog.endpoints.first(),
-        transport: TransportConfig = TransportConfig()
+        transport: TransportConfig = TransportConfig(),
+        mtu: Int = 1280
     ): TunnelProfile {
         val sni = transport.effectiveSni
         val payload = TransportCatalog.renderPayload(
@@ -121,6 +127,8 @@ object WarpApi {
             port = 443,
             sni = sni
         ).ifBlank { null }
+        val dns = TransportCatalog.dnsById(transport.dnsId)?.servers
+            ?: listOf("1.1.1.1", "1.0.0.1")
         return TunnelProfile(
             id = "warp-auto",
             name = "Aether Auto",
@@ -133,8 +141,8 @@ object WarpApi {
             privateKey = reg.privateKey,
             addressV4 = "${reg.addressV4}/32",
             addressV6 = reg.addressV6?.let { "$it/128" },
-            dns = listOf("1.1.1.1", "1.0.0.1"),
-            mtu = 1280,
+            dns = dns,
+            mtu = mtu,
             allowedIps = listOf("0.0.0.0/0", "::/0"),
             persistentKeepalive = 25,
             tier = TunnelProfile.Tier.FREE,

@@ -2,7 +2,6 @@ package com.aether.vpn.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,13 +38,16 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
 import com.aether.vpn.core.Endpoint
 import com.aether.vpn.ui.AppState
+import com.aether.vpn.ui.components.Chip
 import com.aether.vpn.ui.components.EmptyBlock
 import com.aether.vpn.ui.components.GlassCard
 import com.aether.vpn.ui.components.Pill
+import com.aether.vpn.ui.components.clickableNoRipple
 import com.aether.vpn.ui.theme.Amber
 import com.aether.vpn.ui.theme.Cyan
 import com.aether.vpn.ui.theme.Mint
 import com.aether.vpn.ui.theme.Rose
+import com.aether.vpn.ui.theme.TextFaint
 import com.aether.vpn.ui.theme.TextPrimary
 import com.aether.vpn.ui.theme.TextSecondary
 import com.aether.vpn.ui.theme.TextTertiary
@@ -80,7 +82,7 @@ fun ServerListScreen(app: AppState, onPick: (Endpoint) -> Unit) {
     )
 
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(14.dp))
         Text("Servers", style = MaterialTheme.typography.headlineLarge, color = TextPrimary)
         Spacer(Modifier.height(3.dp))
         Text(
@@ -89,26 +91,26 @@ fun ServerListScreen(app: AppState, onPick: (Endpoint) -> Unit) {
             color = TextTertiary
         )
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(14.dp))
 
         // Search field
         Box(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color.White.copy(alpha = 0.05f))
-                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(16.dp))
-                .padding(horizontal = 14.dp, vertical = 13.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(alpha = 0.04f))
+                .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(14.dp))
+                .padding(horizontal = 13.dp, vertical = 11.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.Search, null, tint = TextTertiary, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(10.dp))
+                Icon(Icons.Rounded.Search, null, tint = TextTertiary, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(9.dp))
                 Box(Modifier.weight(1f)) {
                     if (query.isEmpty()) {
                         Text(
                             "Search address or port",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = TextTertiary
+                            color = TextFaint
                         )
                     }
                     BasicTextField(
@@ -123,17 +125,17 @@ fun ServerListScreen(app: AppState, onPick: (Endpoint) -> Unit) {
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(11.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip("All", !onlyFavourites && !onlyReachable) {
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Chip("All", !onlyFavourites && !onlyReachable) {
                 onlyFavourites = false; onlyReachable = false
             }
-            FilterChip("Reachable", onlyReachable) { onlyReachable = !onlyReachable }
-            FilterChip("Favourites", onlyFavourites) { onlyFavourites = !onlyFavourites }
+            Chip("Reachable", onlyReachable) { onlyReachable = !onlyReachable }
+            Chip("Favourites", onlyFavourites) { onlyFavourites = !onlyFavourites }
         }
 
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(13.dp))
 
         if (filtered.isEmpty()) {
             EmptyBlock(
@@ -143,7 +145,7 @@ fun ServerListScreen(app: AppState, onPick: (Endpoint) -> Unit) {
                 else "Try a different address or clear the filters."
             )
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 items(filtered, key = { it.key }) { endpoint ->
                     ServerRow(
                         endpoint = endpoint,
@@ -162,24 +164,6 @@ fun ServerListScreen(app: AppState, onPick: (Endpoint) -> Unit) {
 }
 
 @Composable
-private fun FilterChip(label: String, active: Boolean, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .clip(CircleShape)
-            .background(if (active) Cyan.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.04f))
-            .border(1.dp, if (active) Cyan.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.08f), CircleShape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 7.dp)
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (active) Cyan else TextSecondary
-        )
-    }
-}
-
-@Composable
 private fun ServerRow(
     endpoint: Endpoint,
     latency: Long?,
@@ -192,12 +176,13 @@ private fun ServerRow(
     GlassCard(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickableNoRipple(onClick),
+        accent = if (selected) Mint else null
     ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(15.dp),
+                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Reachability dot
@@ -205,8 +190,8 @@ private fun ServerRow(
                 Modifier
                     .size(38.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.05f))
-                    .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape),
+                    .background(Color.White.copy(alpha = 0.045f))
+                    .border(1.dp, Color.White.copy(alpha = 0.07f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Box(
@@ -223,7 +208,7 @@ private fun ServerRow(
                 )
             }
 
-            Spacer(Modifier.width(13.dp))
+            Spacer(Modifier.width(12.dp))
 
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -233,7 +218,7 @@ private fun ServerRow(
                         color = TextPrimary
                     )
                     if (selected) {
-                        Spacer(Modifier.width(8.dp))
+                        Spacer(Modifier.width(7.dp))
                         Pill("Active", Mint, filled = true)
                     }
                 }
@@ -260,19 +245,19 @@ private fun ServerRow(
                         else -> Rose
                     }
                 )
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(5.dp))
                 Pill(
                     text = if (endpoint.port == 2408) "PRIMARY" else "FALLBACK",
                     color = if (endpoint.port == 2408) Cyan else Violet
                 )
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(5.dp))
                 Icon(
                     imageVector = if (favourite) Icons.Rounded.Star else Icons.Rounded.StarBorder,
                     contentDescription = "Favourite",
                     tint = if (favourite) Amber else TextTertiary,
                     modifier = Modifier
-                        .size(20.dp)
-                        .clickable(onClick = onFavourite)
+                        .size(19.dp)
+                        .clickableNoRipple(onFavourite)
                 )
             }
         }

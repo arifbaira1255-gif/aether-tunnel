@@ -65,7 +65,15 @@ data class TransportConfig(
     val customSni: String = "",
     val customPayload: String = "",
     val endpointKey: String = "162.159.192.1:2408",
-    val autoFailover: Boolean = true
+    val autoFailover: Boolean = true,
+    /** Which carrier profile the user is on — drives the recommended host/payload. */
+    val carrier: Carrier = Carrier.AUTO,
+    /** Try the MTU ladder on a failed connect. */
+    val autoMtu: Boolean = true,
+    /** Reconnect automatically when the tunnel drops. */
+    val watchdog: Boolean = true,
+    /** DNS preset id, or "custom". */
+    val dnsId: String = "dns-cf"
 ) {
     /** The SNI actually used: the custom one wins when it is set. */
     val effectiveSni: String
@@ -79,6 +87,36 @@ data class TransportConfig(
         else TransportCatalog.payloadById(payloadId)?.template ?: ""
 }
 
+/** The Pakistani carriers the app can tune itself for. */
+enum class Carrier(val title: String, val short: String, val flag: String) {
+    AUTO("Auto-detect", "Auto", "\uD83C\uDF10"),
+    JAZZ("Jazz", "Jazz", "\uD83D\uDFE1"),
+    TELENOR("Telenor", "Telenor", "\uD83D\uDD35"),
+    UFONE("Ufone", "Ufone", "\uD83D\uDFE0"),
+    ZONG("Zong", "Zong", "\uD83D\uDFE3"),
+    OTHER("Other network", "Other", "\uD83C\uDF10");
+
+    /** The SNI host this carrier's profile starts on. */
+    val defaultSniId: String
+        get() = when (this) {
+            JAZZ -> "pkj-selfcare"
+            TELENOR -> "pkt-easypaisa"
+            UFONE -> "pku-upaisa"
+            ZONG -> "pkz-www"
+            AUTO, OTHER -> "cf-engage"
+        }
+
+    /** The payload this carrier's profile starts on. */
+    val defaultPayloadId: String
+        get() = when (this) {
+            JAZZ -> "pl-jazz-selfcare"
+            TELENOR -> "pl-telenor-easypaisa"
+            UFONE -> "pl-ufone-upaisa"
+            ZONG -> "pl-zong-portal"
+            AUTO, OTHER -> "pl-none"
+        }
+}
+
 /** One finished connection, kept for the stats screen. */
 data class SessionRecord(
     val profileName: String,
@@ -86,7 +124,9 @@ data class SessionRecord(
     val startedAt: Long,
     val endedAt: Long,
     val rxBytes: Long,
-    val txBytes: Long
+    val txBytes: Long,
+    val mtu: Int = 0,
+    val endpoint: String = ""
 ) {
     val durationMs: Long get() = (endedAt - startedAt).coerceAtLeast(0)
 }
@@ -100,3 +140,48 @@ data class LiveStats(
     val upBps: Long = 0,
     val handshakeAgeMs: Long = -1
 )
+
+/**
+ * A rolling window of throughput samples, so the connect screen can draw a live graph
+ * instead of a single number. Fixed capacity, oldest sample dropped.
+ */
+class SpeedHistory(val capacity: Int = 60) {
+    private val down = LongArray(capacity)
+    private val up = LongArray(capacity)
+    private var count = 0
+    private var head = 0
+
+    fun push(downBps: Long, upBps: Long) {
+        down[head] = downBps
+        up[head] = upBps
+        head = (head + 1) % capacity
+        if (count < capacity) count++
+    }
+
+    fun clear() {
+        count = 0
+        head = 0
+        down.fill(0)
+        up.fill(0)
+    }
+
+    val size: Int get() = count
+
+    /** Oldest-to-newest download samples. */
+    fun downSeries(): List<Long> = series(down)
+
+    /** Oldest-to-newest upload samples. */
+    fun upSeries(): List<Long> = series(up)
+
+    private fun series(buf: LongArray): List<Long> {
+        if (count == 0) return emptyList()
+        val out = ArrayList<Long>(count)
+        val start = if (count < capacity) 0 else head
+        for (i in 0 until count) out.add(buf[(start + i) % capacity])
+        return out
+    }
+
+    /** Peak download in the window, for scaling the graph. */
+    fun peakDown(): Long = downSeries().maxOrNull() ?: 0L
+    fun peakUp(): Long = upSeries().maxOrNull() ?: 0L
+}

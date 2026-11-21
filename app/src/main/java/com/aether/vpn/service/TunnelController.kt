@@ -28,6 +28,11 @@ import java.net.InetAddress
  * The tunnel itself is the WireGuard project's Go userspace implementation running
  * inside Android's VpnService (GoBackend). Nothing here is simulated: when [connect]
  * returns CONNECTED, the device's traffic is being routed through the peer.
+ *
+ * Encryption is WireGuard's own: Curve25519 for key agreement, ChaCha20-Poly1305 for
+ * the data channel, BLAKE2s for hashing, and a fresh ephemeral keypair per handshake
+ * with a 2-minute rekey. There is no knob to turn it up — that is already the strongest
+ * practical profile for a mobile tunnel, and it is what the kernel/Go backend enforces.
  */
 object TunnelController {
 
@@ -45,6 +50,7 @@ object TunnelController {
     private var backend: Backend? = null
     private var tunnel: Tunnel? = null
     private var connectedAt: Long = 0L
+    private var lastPollAt: Long = 0L
 
     fun connectedSince(): Long = connectedAt
 
@@ -91,7 +97,7 @@ object TunnelController {
     }
 
     /**
-     * Brings the tunnel up. Blocking - call from a background dispatcher.
+     * Brings the tunnel up. Blocking — call from a background dispatcher.
      * The caller must already hold VpnService consent (see [prepare]).
      */
     fun connect(context: Context, profile: TunnelProfile) {
@@ -101,6 +107,8 @@ object TunnelController {
             backend(context).setState(tunnel(), Tunnel.State.UP, cfg)
             _activeProfile.value = profile
             connectedAt = System.currentTimeMillis()
+            lastPollAt = connectedAt
+            _stats.value = LiveStats()
             _state.value = TunnelState.CONNECTED
         } catch (t: Throwable) {
             _state.value = TunnelState.ERROR
@@ -108,7 +116,7 @@ object TunnelController {
         }
     }
 
-    /** Tears the tunnel down. Blocking - call from a background dispatcher. */
+    /** Tears the tunnel down. Blocking — call from a background dispatcher. */
     fun disconnect(context: Context) {
         _state.value = TunnelState.DISCONNECTING
         try {
@@ -118,12 +126,18 @@ object TunnelController {
         } finally {
             _activeProfile.value = null
             connectedAt = 0L
+            lastPollAt = 0L
             _stats.value = LiveStats()
             _state.value = TunnelState.DISCONNECTED
         }
     }
 
-    /** Reads live counters from the running tunnel. Safe to call on a timer. */
+    /**
+     * Reads live counters from the running tunnel. Safe to call on a timer.
+     *
+     * The rate is computed against the real elapsed time between polls, not against an
+     * assumed one second, so a slow frame does not inflate the number.
+     */
     fun pollStats(context: Context) {
         if (_state.value != TunnelState.CONNECTED) return
         try {
@@ -131,15 +145,56 @@ object TunnelController {
             val rx = s.totalRx()
             val tx = s.totalTx()
             val prev = _stats.value
+            val now = System.currentTimeMillis()
+            val elapsedMs = if (lastPollAt > 0) (now - lastPollAt).coerceAtLeast(1) else 1000L
+            lastPollAt = now
+
+            val dRx = (rx - prev.rxBytes).coerceAtLeast(0)
+            val dTx = (tx - prev.txBytes).coerceAtLeast(0)
+
+            // The peer's own handshake timestamp is the real proof of life: WireGuard
+            // rekeys every 2 minutes, so a healthy tunnel never shows an age above that.
+            val handshakeAge = runCatching {
+                s.peers().firstOrNull()?.let { key ->
+                    val epoch = s.peer(key).latestHandshakeEpochMillis()
+                    if (epoch > 0) now - epoch else -1L
+                } ?: -1L
+            }.getOrElse { -1L }
+
             _stats.value = LiveStats(
                 rxBytes = rx,
                 txBytes = tx,
-                downBps = (rx - prev.rxBytes).coerceAtLeast(0),
-                upBps = (tx - prev.txBytes).coerceAtLeast(0),
-                handshakeAgeMs = prev.handshakeAgeMs
+                downBps = dRx * 1000L / elapsedMs,
+                upBps = dTx * 1000L / elapsedMs,
+                handshakeAgeMs = handshakeAge
             )
         } catch (_: Throwable) {
             // Tunnel may be tearing down; keep the last numbers.
         }
+    }
+
+    /**
+     * True when the tunnel claims to be up but is not actually carrying traffic.
+     *
+     * Two independent signals, because either alone gives false positives:
+     *  - the peer's handshake is older than [staleHandshakeMs] (WireGuard rekeys every
+     *    2 minutes, so a live peer is never that stale), or
+     *  - the tunnel has been up past the grace period and not a single byte has moved.
+     */
+    fun looksStalled(
+        idleMs: Long = 45_000,
+        staleHandshakeMs: Long = 180_000
+    ): Boolean {
+        if (_state.value != TunnelState.CONNECTED) return false
+        val s = _stats.value
+        val upFor = if (connectedAt > 0) System.currentTimeMillis() - connectedAt else 0L
+
+        // A handshake we have actually seen, and it has gone stale.
+        if (s.handshakeAgeMs > staleHandshakeMs) return true
+
+        // Never moved a byte since the tunnel came up.
+        if (s.rxBytes + s.txBytes == 0L && upFor > idleMs) return true
+
+        return false
     }
 }

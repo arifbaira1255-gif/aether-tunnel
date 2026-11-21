@@ -13,6 +13,11 @@ import com.aether.vpn.core.TunnelProfile
  * with a real WireGuard handshake first, so a blocked port is skipped in about a second
  * instead of hanging the connect button.
  *
+ * On top of that, each reachable endpoint is tried across the MTU ladder. A network that
+ * silently drops large packets will accept the handshake and then stall — the classic
+ * "connects but nothing loads" failure. Stepping the MTU down from 1420 to 1200 is what
+ * gets past it, and the value that worked is remembered for next time.
+ *
  * Nothing here is simulated: [run] calls the real tunnel, and success means the
  * WireGuard backend reported UP.
  */
@@ -24,14 +29,16 @@ object FailoverEngine {
         val probed: Boolean,
         val probeLatencyMs: Long,
         val connected: Boolean,
-        val error: String? = null
+        val error: String? = null,
+        val mtu: Int = 0
     )
 
     data class Outcome(
         val connected: Boolean,
         val profile: TunnelProfile?,
         val attempts: List<Attempt>,
-        val error: String? = null
+        val error: String? = null,
+        val mtu: Int = 0
     )
 
     /**
@@ -47,19 +54,31 @@ object FailoverEngine {
     }
 
     /**
+     * The MTU values to try, in order. When [lastGood] is known it goes first, so a
+     * returning user connects on the first try instead of walking the ladder again.
+     */
+    fun mtuLadder(lastGood: Int, autoMtu: Boolean, fixed: Int): List<Int> {
+        if (!autoMtu) return listOf(fixed)
+        val base = TransportCatalog.mtuLadder
+        return if (lastGood in base) listOf(lastGood) + base.filter { it != lastGood } else base
+    }
+
+    /**
      * Runs the failover loop. Blocking — call from Dispatchers.IO.
      *
-     * @param buildProfile turns an endpoint + transport config into a connectable profile.
+     * @param buildProfile turns an endpoint + transport config + MTU into a connectable profile.
      * @param connect brings the tunnel up; throws on failure.
      * @param disconnect tears a failed attempt down before the next one.
-     * @param maxAttempts caps the loop so a hopeless network fails fast instead of
+     * @param maxAttempts caps the endpoint loop so a hopeless network fails fast instead of
      *        grinding through the whole pool.
      * @param onAttempt called after each attempt so the UI can show progress.
      */
     fun run(
         config: TransportConfig,
         preferred: Endpoint?,
-        buildProfile: (Endpoint, TransportConfig) -> TunnelProfile,
+        lastGoodMtu: Int,
+        fixedMtu: Int,
+        buildProfile: (Endpoint, TransportConfig, Int) -> TunnelProfile,
         connect: (TunnelProfile) -> Unit,
         disconnect: () -> Unit,
         maxAttempts: Int = 12,
@@ -68,6 +87,7 @@ object FailoverEngine {
     ): Outcome {
         val attempts = ArrayList<Attempt>()
         val queue = candidates(preferred).take(maxAttempts)
+        val mtus = mtuLadder(lastGoodMtu, config.autoMtu, fixedMtu)
 
         for (endpoint in queue) {
             // 1. Probe: is this endpoint alive from this network at all?
@@ -85,29 +105,37 @@ object FailoverEngine {
                 continue
             }
 
-            // 2. It answered — try the real tunnel on it.
-            val profile = buildProfile(endpoint, config)
-            val result = runCatching { connect(profile) }
-            if (result.isSuccess) {
-                val a = Attempt(endpoint, true, probe.latencyMs, true)
+            // 2. It answered — try the real tunnel on it, walking the MTU ladder.
+            for (mtu in mtus) {
+                val profile = buildProfile(endpoint, config, mtu)
+                val result = runCatching { connect(profile) }
+                if (result.isSuccess) {
+                    val a = Attempt(endpoint, true, probe.latencyMs, true, mtu = mtu)
+                    attempts.add(a)
+                    onAttempt?.invoke(a)
+                    return Outcome(
+                        connected = true,
+                        profile = profile,
+                        attempts = attempts,
+                        mtu = mtu
+                    )
+                }
+
+                runCatching { disconnect() }
+                val a = Attempt(
+                    endpoint = endpoint,
+                    probed = true,
+                    probeLatencyMs = probe.latencyMs,
+                    connected = false,
+                    error = result.exceptionOrNull()?.message ?: "Tunnel refused",
+                    mtu = mtu
+                )
                 attempts.add(a)
                 onAttempt?.invoke(a)
-                return Outcome(connected = true, profile = profile, attempts = attempts)
             }
-
-            runCatching { disconnect() }
-            val a = Attempt(
-                endpoint = endpoint,
-                probed = true,
-                probeLatencyMs = probe.latencyMs,
-                connected = false,
-                error = result.exceptionOrNull()?.message ?: "Tunnel refused"
-            )
-            attempts.add(a)
-            onAttempt?.invoke(a)
         }
 
-        val reachable = attempts.count { it.connected || it.error == null }
+        val reachable = attempts.count { it.connected || (it.probed && it.error == null) }
         val message = when {
             attempts.isEmpty() -> "No endpoints to try."
             reachable == 0 ->
