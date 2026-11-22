@@ -49,6 +49,7 @@ import com.aether.vpn.ui.theme.Mint
 import com.aether.vpn.ui.theme.Rose
 import com.aether.vpn.ui.theme.Surface1
 import com.aether.vpn.ui.theme.Surface2
+import com.aether.vpn.ui.theme.Surface3
 import com.aether.vpn.ui.theme.TextFaint
 import com.aether.vpn.ui.theme.TextPrimary
 import com.aether.vpn.ui.theme.TextSecondary
@@ -63,7 +64,7 @@ import com.aether.vpn.ui.theme.Violet
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
-    corner: Int = 22,
+    corner: Int = 24,
     accent: Color? = null,
     content: @Composable () -> Unit
 ) {
@@ -73,8 +74,8 @@ fun GlassCard(
             .background(
                 Brush.verticalGradient(
                     listOf(
-                        Surface2.copy(alpha = 0.95f),
-                        Surface1.copy(alpha = 0.90f)
+                        Surface2.copy(alpha = 0.96f),
+                        Surface1.copy(alpha = 0.92f)
                     )
                 )
             )
@@ -91,21 +92,54 @@ fun GlassCard(
                     )
                 )
         )
-        // Optional accent wash in the top-left corner.
         if (accent != null) {
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(120.dp)
+                    .height(140.dp)
                     .background(
                         Brush.radialGradient(
-                            colors = listOf(accent.copy(alpha = 0.10f), Color.Transparent),
+                            colors = listOf(accent.copy(alpha = 0.11f), Color.Transparent),
                             center = Offset(0f, 0f),
-                            radius = 420f
+                            radius = 460f
                         )
                     )
             )
         }
+        content()
+    }
+}
+
+/** A card with a gradient hairline border — used for the hero surfaces. */
+@Composable
+fun GradientBorderCard(
+    modifier: Modifier = Modifier,
+    corner: Int = 26,
+    colors: List<Color> = listOf(Cyan, Violet),
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(corner.dp))
+            .background(Brush.linearGradient(colors.map { it.copy(alpha = 0.55f) }))
+            .padding(1.dp)
+            .clip(RoundedCornerShape((corner - 1).dp))
+            .background(
+                Brush.verticalGradient(
+                    listOf(Surface3.copy(alpha = 0.98f), Surface1.copy(alpha = 0.96f))
+                )
+            )
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(Color.Transparent, Color.White.copy(alpha = 0.22f), Color.Transparent)
+                    )
+                )
+        )
         content()
     }
 }
@@ -123,44 +157,41 @@ fun AmbientBackground(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(18000, easing = LinearEasing),
+            animation = tween(20000, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "drift"
     )
 
     Box(modifier = modifier.background(Ink)) {
-        // Top bloom
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(560.dp)
+                .height(600.dp)
                 .background(
                     Brush.radialGradient(
-                        colors = listOf(accentA.copy(alpha = 0.17f), Color.Transparent),
-                        center = Offset(200f + drift * 140f, 40f),
-                        radius = 950f
+                        colors = listOf(accentA.copy(alpha = 0.16f), Color.Transparent),
+                        center = Offset(180f + drift * 160f, 20f),
+                        radius = 1000f
                     )
                 )
         )
-        // Mid bloom
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(700.dp)
+                .height(760.dp)
                 .background(
                     Brush.radialGradient(
                         colors = listOf(accentB.copy(alpha = 0.13f), Color.Transparent),
-                        center = Offset(760f - drift * 180f, 460f),
-                        radius = 1050f
+                        center = Offset(800f - drift * 200f, 500f),
+                        radius = 1100f
                     )
                 )
         )
-        // Bottom wash, keeps the tab bar from floating on pure black
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(420.dp)
+                .height(460.dp)
                 .background(
                     Brush.verticalGradient(
                         listOf(Color.Transparent, accentA.copy(alpha = 0.05f))
@@ -206,9 +237,9 @@ fun Pill(
     Box(
         modifier = modifier
             .clip(CircleShape)
-            .background(if (filled) color.copy(alpha = 0.15f) else Color.Transparent)
-            .border(1.dp, color.copy(alpha = if (filled) 0.35f else 0.42f), CircleShape)
-            .padding(horizontal = 9.dp, vertical = 3.dp)
+            .background(if (filled) color.copy(alpha = 0.14f) else Color.Transparent)
+            .border(1.dp, color.copy(alpha = if (filled) 0.32f else 0.40f), CircleShape)
+            .padding(horizontal = 10.dp, vertical = 3.5.dp)
     ) {
         Text(
             text = text.uppercase(),
@@ -301,7 +332,7 @@ fun EmptyBlock(title: String, body: String, modifier: Modifier = Modifier) {
     ) {
         Box(
             Modifier
-                .size(48.dp)
+                .size(52.dp)
                 .clip(CircleShape)
                 .background(Color.White.copy(alpha = 0.04f))
                 .border(1.dp, Hairline, CircleShape)
@@ -345,9 +376,17 @@ fun SpeedGraph(
         val mid = h / 2f
         val half = h / 2f - 2.dp.toPx()
 
-        // Baseline
+        // Grid lines
+        listOf(0.25f, 0.5f, 0.75f).forEach { f ->
+            drawLine(
+                color = Color.White.copy(alpha = 0.035f),
+                start = Offset(0f, h * f),
+                end = Offset(w, h * f),
+                strokeWidth = 1.dp.toPx()
+            )
+        }
         drawLine(
-            color = Color.White.copy(alpha = 0.06f),
+            color = Color.White.copy(alpha = 0.07f),
             start = Offset(0f, mid),
             end = Offset(w, mid),
             strokeWidth = 1.dp.toPx()
@@ -384,36 +423,34 @@ fun SpeedGraph(
             return path
         }
 
-        val downAlpha = if (active) 1f else 0.35f
+        val a = if (active) 1f else 0.35f
 
-        // Download area + line
         drawPath(
             buildFill(down, false),
             brush = Brush.verticalGradient(
-                listOf(Cyan.copy(alpha = 0.30f * downAlpha), Color.Transparent),
+                listOf(Cyan.copy(alpha = 0.32f * a), Color.Transparent),
                 startY = mid - half,
                 endY = mid
             )
         )
         drawPath(
             buildPath(down, false),
-            color = Cyan.copy(alpha = downAlpha),
-            style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round)
+            color = Cyan.copy(alpha = a),
+            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
         )
 
-        // Upload area + line
         drawPath(
             buildFill(up, true),
             brush = Brush.verticalGradient(
-                listOf(Color.Transparent, Violet.copy(alpha = 0.26f * downAlpha)),
+                listOf(Color.Transparent, Violet.copy(alpha = 0.28f * a)),
                 startY = mid,
                 endY = mid + half
             )
         )
         drawPath(
             buildPath(up, true),
-            color = Violet.copy(alpha = downAlpha),
-            style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round)
+            color = Violet.copy(alpha = a),
+            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
         )
     }
 }
@@ -515,10 +552,10 @@ fun CodeBlock(text: String, modifier: Modifier = Modifier, maxLines: Int = 6) {
     Box(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color.Black.copy(alpha = 0.32f))
-            .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp))
-            .padding(10.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Black.copy(alpha = 0.34f))
+            .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+            .padding(11.dp)
     ) {
         Text(
             text = text,
@@ -550,7 +587,7 @@ fun Chip(
                 CircleShape
             )
             .clickableNoRipple(onClick)
-            .padding(horizontal = 13.dp, vertical = 7.dp)
+            .padding(horizontal = 14.dp, vertical = 7.5.dp)
     ) {
         Text(
             label,
@@ -584,4 +621,70 @@ fun FaintHint(text: String, modifier: Modifier = Modifier) {
         color = TextFaint,
         modifier = modifier
     )
+}
+
+/** A screen header: eyebrow, title, optional trailing slot. */
+@Composable
+fun ScreenHeader(
+    eyebrow: String,
+    title: String,
+    modifier: Modifier = Modifier,
+    accent: Color = Cyan,
+    trailing: @Composable (() -> Unit)? = null
+) {
+    Row(
+        modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(
+                eyebrow.uppercase(),
+                style = MaterialTheme.typography.labelSmall,
+                color = accent.copy(alpha = 0.85f)
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.headlineLarge,
+                color = TextPrimary
+            )
+        }
+        trailing?.invoke()
+    }
+}
+
+/** A stat tile: big number, small label, optional accent. */
+@Composable
+fun StatTile(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    accent: Color = Cyan,
+    sub: String? = null
+) {
+    GlassCard(modifier, corner = 20, accent = accent) {
+        Column(Modifier.padding(15.dp)) {
+            Text(
+                label.uppercase(),
+                style = MaterialTheme.typography.labelSmall,
+                color = TextTertiary
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                value,
+                style = MaterialTheme.typography.headlineSmall,
+                color = TextPrimary,
+                fontWeight = FontWeight.Bold
+            )
+            if (sub != null) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    sub,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = accent.copy(alpha = 0.85f)
+                )
+            }
+        }
+    }
 }

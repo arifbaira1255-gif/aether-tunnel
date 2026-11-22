@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aether.vpn.core.TunnelState
 import com.aether.vpn.ui.theme.Cyan
+import com.aether.vpn.ui.theme.Indigo
 import com.aether.vpn.ui.theme.Mint
 import com.aether.vpn.ui.theme.TextPrimary
 import com.aether.vpn.ui.theme.TextSecondary
@@ -63,7 +64,7 @@ fun ConnectButton(
     state: TunnelState,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    size: Int = 244
+    size: Int = 252
 ) {
     val connected = state == TunnelState.CONNECTED
     val busy = state == TunnelState.CONNECTING || state == TunnelState.DISCONNECTING
@@ -76,7 +77,7 @@ fun ConnectButton(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(if (connected) 2400 else 3600, easing = LinearEasing),
+            animation = tween(if (connected) 2400 else 3800, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "breathe"
@@ -86,7 +87,7 @@ fun ConnectButton(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(if (busy) 900 else if (connected) 3600 else 9000, easing = LinearEasing),
+            animation = tween(if (busy) 900 else if (connected) 3400 else 10000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "spin"
@@ -96,7 +97,7 @@ fun ConnectButton(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(if (connected) 7000 else 14000, easing = LinearEasing),
+            animation = tween(if (connected) 7000 else 15000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "orbit"
@@ -114,8 +115,8 @@ fun ConnectButton(
             val base = this.size.minDimension / 2f
             repeat(4) { i ->
                 val phase = (breathe + i * 0.25f) % 1f
-                val radius = base * (0.66f + phase * 0.34f)
-                val alpha = (1f - phase) * (if (connected) 0.26f else 0.18f)
+                val radius = base * (0.64f + phase * 0.36f)
+                val alpha = (1f - phase) * (if (connected) 0.28f else 0.19f)
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(accent.copy(alpha = alpha), Color.Transparent),
@@ -131,25 +132,25 @@ fun ConnectButton(
         // ---- Orbiting particles -------------------------------------------
         Canvas(Modifier.size(size.dp)) {
             val center = Offset(this.size.width / 2f, this.size.height / 2f)
-            val radius = this.size.minDimension / 2f * 0.86f
+            val radius = this.size.minDimension / 2f * 0.87f
             val count = 3
             repeat(count) { i ->
                 val angle = Math.toRadians((orbit + i * (360f / count)).toDouble())
                 val x = center.x + (cos(angle) * radius).toFloat()
                 val y = center.y + (sin(angle) * radius).toFloat()
-                val dotAlpha = if (connected) 0.85f else 0.35f
+                val dotAlpha = if (connected) 0.9f else 0.38f
                 drawCircle(
-                    color = accent.copy(alpha = dotAlpha),
-                    radius = 2.2.dp.toPx(),
+                    brush = Brush.radialGradient(
+                        colors = listOf(accent.copy(alpha = 0.40f), Color.Transparent),
+                        center = Offset(x, y),
+                        radius = 10.dp.toPx()
+                    ),
+                    radius = 10.dp.toPx(),
                     center = Offset(x, y)
                 )
                 drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(accent.copy(alpha = 0.35f), Color.Transparent),
-                        center = Offset(x, y),
-                        radius = 9.dp.toPx()
-                    ),
-                    radius = 9.dp.toPx(),
+                    color = accent.copy(alpha = dotAlpha),
+                    radius = 2.4.dp.toPx(),
                     center = Offset(x, y)
                 )
             }
@@ -158,19 +159,18 @@ fun ConnectButton(
         // ---- Rotating conic ring ------------------------------------------
         Canvas(
             Modifier
-                .size((size - 24).dp)
+                .size((size - 22).dp)
                 .rotate(spin)
         ) {
-            val stroke = 2.5.dp.toPx()
+            val stroke = 2.6.dp.toPx()
             val inset = stroke / 2f
             val arcSize = Size(this.size.width - stroke, this.size.height - stroke)
-            val topLeft = Offset(inset, inset)
             drawArc(
                 brush = Brush.sweepGradient(
                     listOf(
                         Color.Transparent,
-                        accent.copy(alpha = 0.10f),
-                        accent.copy(alpha = 0.85f),
+                        accent.copy(alpha = 0.08f),
+                        accent.copy(alpha = 0.90f),
                         accent2,
                         Color.Transparent
                     )
@@ -178,7 +178,7 @@ fun ConnectButton(
                 startAngle = 0f,
                 sweepAngle = 290f,
                 useCenter = false,
-                topLeft = topLeft,
+                topLeft = Offset(inset, inset),
                 size = arcSize,
                 style = Stroke(width = stroke, cap = StrokeCap.Round)
             )
@@ -187,7 +187,7 @@ fun ConnectButton(
         // ---- Static inner ring --------------------------------------------
         Box(
             Modifier
-                .size((size - 24).dp)
+                .size((size - 22).dp)
                 .clip(CircleShape)
                 .border(1.dp, Color.White.copy(alpha = 0.06f), CircleShape)
         )
@@ -195,18 +195,18 @@ fun ConnectButton(
         // ---- Core ---------------------------------------------------------
         Box(
             modifier = Modifier
-                .size((size - 58).dp)
-                .scale(1f + breathe * 0.014f)
+                .size((size - 56).dp)
+                .scale(1f + breathe * 0.015f)
                 .clip(CircleShape)
                 .background(
                     Brush.linearGradient(
                         listOf(
-                            accent.copy(alpha = if (connected) 0.26f else 0.18f),
-                            accent2.copy(alpha = if (connected) 0.20f else 0.15f)
+                            accent.copy(alpha = if (connected) 0.28f else 0.19f),
+                            accent2.copy(alpha = if (connected) 0.22f else 0.16f)
                         )
                     )
                 )
-                .border(1.dp, accent.copy(alpha = 0.30f), CircleShape)
+                .border(1.dp, accent.copy(alpha = 0.32f), CircleShape)
                 .clickable(
                     interactionSource = interaction,
                     indication = null,
@@ -215,14 +215,13 @@ fun ConnectButton(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            // Inner sheen
             Box(
                 Modifier
-                    .size((size - 58).dp)
+                    .size((size - 56).dp)
                     .clip(CircleShape)
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color.White.copy(alpha = 0.05f), Color.Transparent)
+                            listOf(Color.White.copy(alpha = 0.06f), Color.Transparent)
                         )
                     )
             )
@@ -231,9 +230,9 @@ fun ConnectButton(
                     imageVector = Icons.Rounded.PowerSettingsNew,
                     contentDescription = "Connect",
                     tint = if (connected) Mint else TextPrimary,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(50.dp)
                 )
-                Spacer(Modifier.height(11.dp))
+                Spacer(Modifier.height(12.dp))
                 Text(
                     text = when (state) {
                         TunnelState.CONNECTED -> "CONNECTED"
@@ -245,7 +244,7 @@ fun ConnectButton(
                     style = MaterialTheme.typography.labelSmall,
                     color = if (connected) Mint else TextSecondary,
                     fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 1.6.sp
+                    letterSpacing = 1.7.sp
                 )
             }
         }

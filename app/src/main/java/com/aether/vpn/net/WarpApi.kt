@@ -26,8 +26,18 @@ import java.util.TimeZone
  */
 object WarpApi {
 
-    private const val REG_URL = "https://api.cloudflareclient.com/v0a2158/reg"
     private const val CLIENT_VERSION = "a-6.30-2158"
+
+    /**
+     * Registration hosts, tried in order. Cloudflare has moved this endpoint between
+     * hostnames over the years and a blocked one is common on mobile carriers, so a
+     * single hard-coded URL is a single point of failure.
+     */
+    private val REG_URLS = listOf(
+        "https://api.cloudflareclient.com/v0a2158/reg",
+        "https://api.cloudflareclient.com/v0i1909051800/reg",
+        "https://zero-trust-client.cloudflareclient.com/v0a2158/reg"
+    )
 
     /** Endpoints Cloudflare publishes for WARP; the first that answers is used. */
     private val ENDPOINTS = listOf(
@@ -67,7 +77,25 @@ object WarpApi {
             put("locale", "en_US")
         }.toString()
 
-        val conn = (URL(REG_URL).openConnection() as HttpURLConnection).apply {
+        var lastError: Throwable? = null
+        for (url in REG_URLS) {
+            val attempt = runCatching { post(url, body, keyPair, publicKey) }
+            attempt.getOrNull()?.let { return it }
+            lastError = attempt.exceptionOrNull()
+        }
+        throw IllegalStateException(
+            "WARP registration failed on every host: ${lastError?.message ?: "unknown"}",
+            lastError
+        )
+    }
+
+    private fun post(
+        url: String,
+        body: String,
+        keyPair: KeyPair,
+        publicKey: String
+    ): Registration {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 20_000
             readTimeout = 20_000
@@ -143,7 +171,10 @@ object WarpApi {
             addressV6 = reg.addressV6?.let { "$it/128" },
             dns = dns,
             mtu = mtu,
-            allowedIps = listOf("0.0.0.0/0", "::/0"),
+            // IPv6 is only routed when the admin turned it on. Routing ::/0 over a
+            // tunnel whose v6 path is broken is the #1 cause of "connected, nothing loads".
+            allowedIps = if (transport.routeIpv6) listOf("0.0.0.0/0", "::/0")
+            else listOf("0.0.0.0/0"),
             persistentKeepalive = 25,
             tier = TunnelProfile.Tier.FREE,
             sni = sni,

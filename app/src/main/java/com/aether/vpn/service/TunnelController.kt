@@ -25,14 +25,12 @@ import java.net.InetAddress
 /**
  * Owns the real WireGuard tunnel.
  *
- * The tunnel itself is the WireGuard project's Go userspace implementation running
- * inside Android's VpnService (GoBackend). Nothing here is simulated: when [connect]
- * returns CONNECTED, the device's traffic is being routed through the peer.
+ * The tunnel is the WireGuard project's Go userspace implementation running inside
+ * Android's VpnService (GoBackend). Nothing here is simulated: when [connect] returns
+ * normally, the device's traffic is being routed through the peer.
  *
- * Encryption is WireGuard's own: Curve25519 for key agreement, ChaCha20-Poly1305 for
- * the data channel, BLAKE2s for hashing, and a fresh ephemeral keypair per handshake
- * with a 2-minute rekey. There is no knob to turn it up — that is already the strongest
- * practical profile for a mobile tunnel, and it is what the kernel/Go backend enforces.
+ * Encryption is WireGuard's own: Curve25519 key agreement, ChaCha20-Poly1305 data
+ * channel, BLAKE2s hashing, fresh ephemeral keypair per handshake, 2-minute rekey.
  */
 object TunnelController {
 
@@ -51,16 +49,18 @@ object TunnelController {
     private var tunnel: Tunnel? = null
     private var connectedAt: Long = 0L
     private var lastPollAt: Long = 0L
+    private var peakDown: Long = 0L
+    private var peakUp: Long = 0L
 
     fun connectedSince(): Long = connectedAt
 
     /** The VpnService consent intent, or null when the user has already granted it. */
     fun prepare(context: Context): Intent? = VpnService.prepare(context)
 
-    private fun backend(context: Context): Backend =
+    private fun backendFor(context: Context): Backend =
         backend ?: GoBackend(context.applicationContext).also { backend = it }
 
-    private fun tunnel(): Tunnel = tunnel ?: object : Tunnel {
+    private fun tunnelInstance(): Tunnel = tunnel ?: object : Tunnel {
         override fun getName(): String = TUNNEL_NAME
         override fun onStateChange(newState: Tunnel.State) {
             _state.value = when (newState) {
@@ -79,7 +79,11 @@ object TunnelController {
             .setKeyPair(keyPair)
             .addAddress(InetNetwork.parse(profile.addressV4))
             .setMtu(profile.mtu)
-        profile.addressV6?.let { ifaceBuilder.addAddress(InetNetwork.parse(it)) }
+        // Only add the v6 address when v6 is actually routed. Adding an address without
+        // routing it makes Android prefer IPv6 for DNS and then blackhole it.
+        if (profile.allowedIps.any { it.contains(":") }) {
+            profile.addressV6?.let { ifaceBuilder.addAddress(InetNetwork.parse(it)) }
+        }
         profile.dns.forEach { ifaceBuilder.addDnsServer(InetAddress.getByName(it)) }
         val iface = ifaceBuilder.build()
 
@@ -104,10 +108,12 @@ object TunnelController {
         _state.value = TunnelState.CONNECTING
         try {
             val cfg = buildConfig(profile)
-            backend(context).setState(tunnel(), Tunnel.State.UP, cfg)
+            backendFor(context).setState(tunnelInstance(), Tunnel.State.UP, cfg)
             _activeProfile.value = profile
             connectedAt = System.currentTimeMillis()
             lastPollAt = connectedAt
+            peakDown = 0L
+            peakUp = 0L
             _stats.value = LiveStats()
             _state.value = TunnelState.CONNECTED
         } catch (t: Throwable) {
@@ -120,17 +126,30 @@ object TunnelController {
     fun disconnect(context: Context) {
         _state.value = TunnelState.DISCONNECTING
         try {
-            backend(context).setState(tunnel(), Tunnel.State.DOWN, null)
+            backendFor(context).setState(tunnelInstance(), Tunnel.State.DOWN, null)
         } catch (_: Throwable) {
             // Already down is fine.
         } finally {
             _activeProfile.value = null
             connectedAt = 0L
             lastPollAt = 0L
+            peakDown = 0L
+            peakUp = 0L
             _stats.value = LiveStats()
             _state.value = TunnelState.DISCONNECTED
         }
     }
+
+    /** Raw counters straight from the backend, or null when they cannot be read. */
+    private fun readCounters(context: Context): Triple<Long, Long, Long>? = runCatching {
+        val s: Statistics = backendFor(context).getStatistics(tunnelInstance())
+        val rx = s.totalRx()
+        val tx = s.totalTx()
+        val handshake = s.peers().firstOrNull()?.let { key ->
+            s.peer(key)?.latestHandshakeEpochMillis() ?: -1L
+        } ?: -1L
+        Triple(rx, tx, handshake)
+    }.getOrNull()
 
     /**
      * Reads live counters from the running tunnel. Safe to call on a timer.
@@ -140,37 +159,48 @@ object TunnelController {
      */
     fun pollStats(context: Context) {
         if (_state.value != TunnelState.CONNECTED) return
-        try {
-            val s: Statistics = backend(context).getStatistics(tunnel())
-            val rx = s.totalRx()
-            val tx = s.totalTx()
-            val prev = _stats.value
-            val now = System.currentTimeMillis()
-            val elapsedMs = if (lastPollAt > 0) (now - lastPollAt).coerceAtLeast(1) else 1000L
-            lastPollAt = now
+        val counters = readCounters(context) ?: return
+        val (rx, tx, handshakeEpoch) = counters
+        val prev = _stats.value
+        val now = System.currentTimeMillis()
+        val elapsedMs = if (lastPollAt > 0) (now - lastPollAt).coerceAtLeast(1) else 1000L
+        lastPollAt = now
 
-            val dRx = (rx - prev.rxBytes).coerceAtLeast(0)
-            val dTx = (tx - prev.txBytes).coerceAtLeast(0)
+        val dRx = (rx - prev.rxBytes).coerceAtLeast(0)
+        val dTx = (tx - prev.txBytes).coerceAtLeast(0)
+        val downBps = dRx * 1000L / elapsedMs
+        val upBps = dTx * 1000L / elapsedMs
+        if (downBps > peakDown) peakDown = downBps
+        if (upBps > peakUp) peakUp = upBps
 
-            // The peer's own handshake timestamp is the real proof of life: WireGuard
-            // rekeys every 2 minutes, so a healthy tunnel never shows an age above that.
-            val handshakeAge = runCatching {
-                s.peers().firstOrNull()?.let { key ->
-                    val epoch = s.peer(key)?.latestHandshakeEpochMillis() ?: -1L
-                    if (epoch > 0) now - epoch else -1L
-                } ?: -1L
-            }.getOrElse { -1L }
+        val handshakeAge = if (handshakeEpoch > 0) now - handshakeEpoch else -1L
 
-            _stats.value = LiveStats(
-                rxBytes = rx,
-                txBytes = tx,
-                downBps = dRx * 1000L / elapsedMs,
-                upBps = dTx * 1000L / elapsedMs,
-                handshakeAgeMs = handshakeAge
-            )
-        } catch (_: Throwable) {
-            // Tunnel may be tearing down; keep the last numbers.
+        _stats.value = LiveStats(
+            rxBytes = rx,
+            txBytes = tx,
+            downBps = downBps,
+            upBps = upBps,
+            handshakeAgeMs = handshakeAge,
+            peakDownBps = peakDown,
+            peakUpBps = peakUp
+        )
+    }
+
+    /**
+     * Waits until the peer has completed a handshake, or the timeout expires.
+     * A completed handshake is the proof that the key exchange worked end to end.
+     */
+    fun awaitHandshake(context: Context, timeoutMs: Long = 4000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val c = readCounters(context)
+            if (c != null && c.third > 0) {
+                val age = System.currentTimeMillis() - c.third
+                if (age in 0..15_000) return true
+            }
+            Thread.sleep(150)
         }
+        return false
     }
 
     /**
@@ -189,12 +219,8 @@ object TunnelController {
         val s = _stats.value
         val upFor = if (connectedAt > 0) System.currentTimeMillis() - connectedAt else 0L
 
-        // A handshake we have actually seen, and it has gone stale.
         if (s.handshakeAgeMs > staleHandshakeMs) return true
-
-        // Never moved a byte since the tunnel came up.
         if (s.rxBytes + s.txBytes == 0L && upFor > idleMs) return true
-
         return false
     }
 }

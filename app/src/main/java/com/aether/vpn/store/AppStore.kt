@@ -139,7 +139,9 @@ class AppStore(context: Context) {
                 }.getOrElse { Carrier.AUTO },
                 autoMtu = o.optBoolean("autoMtu", true),
                 watchdog = o.optBoolean("watchdog", true),
-                dnsId = o.optString("dnsId", "dns-cf")
+                dnsId = o.optString("dnsId", "dns-cf"),
+                verifyTraffic = o.optBoolean("verifyTraffic", true),
+                routeIpv6 = o.optBoolean("routeIpv6", false)
             )
         }.getOrElse { TransportConfig() }
     }
@@ -156,6 +158,8 @@ class AppStore(context: Context) {
             put("autoMtu", config.autoMtu)
             put("watchdog", config.watchdog)
             put("dnsId", config.dnsId)
+            put("verifyTraffic", config.verifyTraffic)
+            put("routeIpv6", config.routeIpv6)
         }
         prefs.edit().putString(KEY_TRANSPORT, o.toString()).apply()
     }
@@ -182,6 +186,41 @@ class AppStore(context: Context) {
         results.forEach { (k, v) -> o.put(k, v) }
         prefs.edit().putString(KEY_PROBES, o.toString()).apply()
     }
+
+    // ---- admin lock --------------------------------------------------------
+
+    /**
+     * The admin PIN. Everything that can break the tunnel (SNI, payload, endpoint, MTU,
+     * DNS, IPv6) is behind this, so a normal user cannot put the app into a state where
+     * it connects and then carries nothing.
+     *
+     * The PIN is stored as a salted SHA-256 hash, never in clear text. The default is
+     * set on first run and can be changed from the admin panel.
+     */
+    fun hasAdminPin(): Boolean = prefs.contains(KEY_ADMIN_HASH)
+
+    fun setAdminPin(pin: String) {
+        val salt = java.util.UUID.randomUUID().toString()
+        prefs.edit()
+            .putString(KEY_ADMIN_SALT, salt)
+            .putString(KEY_ADMIN_HASH, hashPin(pin, salt))
+            .apply()
+    }
+
+    fun checkAdminPin(pin: String): Boolean {
+        val salt = prefs.getString(KEY_ADMIN_SALT, null) ?: return false
+        val stored = prefs.getString(KEY_ADMIN_HASH, null) ?: return false
+        return stored == hashPin(pin, salt)
+    }
+
+    private fun hashPin(pin: String, salt: String): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val bytes = md.digest((salt + ":" + pin).toByteArray())
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    /** True once the admin has unlocked this session. Not persisted across restarts. */
+    var adminUnlocked: Boolean = false
 
     // ---- preferences -------------------------------------------------------
 
@@ -245,6 +284,8 @@ class AppStore(context: Context) {
         const val KEY_TRANSPORT = "transport_config"
         const val KEY_PROBES = "probe_results"
         const val KEY_GOOD_MTU = "last_good_mtu"
+        const val KEY_ADMIN_HASH = "admin_hash"
+        const val KEY_ADMIN_SALT = "admin_salt"
         const val MAX_SESSIONS = 100
     }
 }

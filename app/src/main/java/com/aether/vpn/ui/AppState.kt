@@ -14,10 +14,12 @@ import com.aether.vpn.core.TransportCatalog
 import com.aether.vpn.core.TransportConfig
 import com.aether.vpn.core.TunnelProfile
 import com.aether.vpn.core.TunnelState
+import com.aether.vpn.net.ConnectivityVerifier
 import com.aether.vpn.net.FailoverEngine
 import com.aether.vpn.net.TunnelProbe
 import com.aether.vpn.net.WarpApi
 import com.aether.vpn.service.TunnelController
+import com.aether.vpn.service.TunnelNotification
 import com.aether.vpn.store.AppStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,29 +49,36 @@ class AppState(private val context: Context) {
     var connectedAt by mutableStateOf(0L)
         private set
 
-    /** The SNI / payload / endpoint selection. */
+    /** The SNI / payload / endpoint selection. Admin-owned. */
     var transport by mutableStateOf(store.transport())
         private set
 
-    /** Live failover progress, so the connect screen can show what it is trying. */
     var failoverNote by mutableStateOf<String?>(null)
         private set
     var attempts by mutableStateOf<List<FailoverEngine.Attempt>>(emptyList())
         private set
 
-    /** Cached endpoint reachability: endpoint key -> latency in ms. */
     var probeResults by mutableStateOf(store.probeResults())
         private set
     var probing by mutableStateOf(false)
         private set
 
-    /** Rolling throughput window for the live graph. */
+    /** True once a real HTTP request has come back through the tunnel. */
+    var trafficVerified by mutableStateOf(false)
+        private set
+    /** Round-trip time of that verification request, in ms. */
+    var verifiedLatencyMs by mutableStateOf(0L)
+        private set
+
     val speed = SpeedHistory(60)
     var speedTick by mutableStateOf(0L)
         private set
 
-    /** The MTU the current session came up on, 0 when not connected. */
     var activeMtu by mutableStateOf(0)
+        private set
+
+    /** Admin session unlock. Not persisted — a restart re-locks the panel. */
+    var adminUnlocked by mutableStateOf(false)
         private set
 
     val sessions = mutableStateListOf<SessionRecord>()
@@ -77,14 +86,17 @@ class AppState(private val context: Context) {
 
     private var pollJob: kotlinx.coroutines.Job? = null
     private var watchdogJob: kotlinx.coroutines.Job? = null
+    private var notifyJob: kotlinx.coroutines.Job? = null
 
     init {
         registration = store.registration()
         sessions.addAll(store.sessions())
         favourites.addAll(store.favourites())
+        // First run: seed the admin PIN so the panel is never open by default.
+        if (!store.hasAdminPin()) store.setAdminPin(DEFAULT_ADMIN_PIN)
+        TunnelNotification.ensureChannel(context)
     }
 
-    /** The endpoint pool the server screen shows. */
     fun endpoints(): List<Endpoint> = TransportCatalog.endpoints
 
     fun refreshFromStore() {
@@ -97,9 +109,27 @@ class AppState(private val context: Context) {
         refreshFromStore()
     }
 
-    // ---- transport editing -------------------------------------------------
+    // ---- admin -------------------------------------------------------------
+
+    fun unlockAdmin(pin: String): Boolean {
+        val ok = store.checkAdminPin(pin)
+        if (ok) adminUnlocked = true
+        return ok
+    }
+
+    fun lockAdmin() { adminUnlocked = false }
+
+    fun changeAdminPin(current: String, next: String): Boolean {
+        if (!store.checkAdminPin(current)) return false
+        if (next.length < 4) return false
+        store.setAdminPin(next)
+        return true
+    }
+
+    // ---- transport editing (admin only) ------------------------------------
 
     fun updateTransport(block: (TransportConfig) -> TransportConfig) {
+        if (!adminUnlocked) return
         val next = block(transport)
         transport = next
         store.saveTransport(next)
@@ -109,29 +139,32 @@ class AppState(private val context: Context) {
         updateTransport { it.copy(endpointKey = endpoint.key) }
     }
 
+    /**
+     * Remembers the endpoint that actually worked, regardless of who is signed in.
+     * The failover engine calls this after a verified connection, so the next connect
+     * starts from the edge that is known to work on this network.
+     */
+    private fun rememberWorkingEndpoint(endpoint: Endpoint) {
+        val next = transport.copy(endpointKey = endpoint.key)
+        transport = next
+        store.saveTransport(next)
+    }
+
     fun selectSni(id: String) = updateTransport { it.copy(sniId = id, customSni = "") }
-
     fun selectPayload(id: String) = updateTransport { it.copy(payloadId = id) }
-
     fun setCustomSni(value: String) = updateTransport { it.copy(customSni = value) }
-
     fun setCustomPayload(value: String) = updateTransport { it.copy(customPayload = value) }
-
     fun setAutoFailover(value: Boolean) = updateTransport { it.copy(autoFailover = value) }
-
     fun setAutoMtu(value: Boolean) = updateTransport { it.copy(autoMtu = value) }
-
     fun setWatchdog(value: Boolean) = updateTransport { it.copy(watchdog = value) }
+    fun setVerifyTraffic(value: Boolean) = updateTransport { it.copy(verifyTraffic = value) }
+    fun setRouteIpv6(value: Boolean) = updateTransport { it.copy(routeIpv6 = value) }
 
     fun setDnsPreset(id: String) {
         updateTransport { it.copy(dnsId = id) }
         TransportCatalog.dnsById(id)?.let { store.dns = it.servers.joinToString(", ") }
     }
 
-    /**
-     * Switches the whole transport profile to a carrier: its SNI host, its payload and
-     * its DNS. This is the one-tap "I am on Jazz" action.
-     */
     fun selectCarrier(carrier: Carrier) {
         updateTransport {
             it.copy(
@@ -143,10 +176,8 @@ class AppState(private val context: Context) {
         }
     }
 
-    /** The SNI host currently in effect, for display. */
     fun activeSni(): String = transport.effectiveSni
 
-    /** The rendered payload currently in effect, for display. */
     fun activePayload(): String = TransportCatalog.renderPayload(
         template = transport.effectivePayloadTemplate,
         host = transport.effectiveSni,
@@ -156,10 +187,6 @@ class AppState(private val context: Context) {
 
     // ---- probing -----------------------------------------------------------
 
-    /**
-     * Probes the whole endpoint pool from this device and caches the results.
-     * Blocking work runs on IO; the UI shows [probing] while it happens.
-     */
     fun probeAll(scope: CoroutineScope) {
         if (probing) return
         probing = true
@@ -176,7 +203,6 @@ class AppState(private val context: Context) {
                 error = "No endpoint answered from this network. UDP may be blocked here."
             } else {
                 error = null
-                // Move the selection to the fastest endpoint that answered.
                 reachable.entries.minByOrNull { it.value }?.let { best ->
                     TransportCatalog.endpoints.firstOrNull { it.key == best.key }
                         ?.let { selectEndpoint(it) }
@@ -187,7 +213,6 @@ class AppState(private val context: Context) {
 
     // ---- registration ------------------------------------------------------
 
-    /** Registers a WARP device if we do not have one yet. */
     suspend fun ensureRegistration(): WarpApi.Registration? {
         registration?.let { return it }
         return withContext(Dispatchers.IO) {
@@ -201,7 +226,6 @@ class AppState(private val context: Context) {
         }
     }
 
-    /** The profile the tunnel would use right now, with preferences applied. */
     fun currentProfile(): TunnelProfile? {
         val reg = registration ?: return null
         val endpoint = store.selectedEndpoint() ?: TransportCatalog.endpoints.first()
@@ -216,7 +240,9 @@ class AppState(private val context: Context) {
         busy = true
         error = null
         attempts = emptyList()
-        failoverNote = "Registering with the WARP edge\u2026"
+        trafficVerified = false
+        verifiedLatencyMs = 0L
+        failoverNote = "Registering with the WARP edge…"
         scope.launch {
             val reg = ensureRegistration()
             if (reg == null) {
@@ -227,10 +253,21 @@ class AppState(private val context: Context) {
             }
 
             state = TunnelState.CONNECTING
-            failoverNote = "Probing endpoints\u2026"
+            failoverNote = "Probing endpoints…"
             val preferred = store.selectedEndpoint()
             val cfg = transport
             val collected = ArrayList<FailoverEngine.Attempt>()
+
+            // Two gates: the peer must have completed a handshake, and a real request
+            // must come back. Either alone gives a false green.
+            val verifyFn: (() -> Boolean)? = if (cfg.verifyTraffic) {
+                {
+                    val handshake = TunnelController.awaitHandshake(context, 5000)
+                    handshake && ConnectivityVerifier.check(timeoutMs = 6000).ok
+                }
+            } else {
+                null
+            }
 
             val outcome = withContext(Dispatchers.IO) {
                 FailoverEngine.run(
@@ -246,18 +283,27 @@ class AppState(private val context: Context) {
                     },
                     connect = { profile -> TunnelController.connect(context, profile) },
                     disconnect = { runCatching { TunnelController.disconnect(context) } },
+                    verify = verifyFn,
                     maxAttempts = if (cfg.autoFailover) 12 else 1,
-                    onAttempt = { attempt -> collected.add(attempt) }
+                    onAttempt = { attempt ->
+                        collected.add(attempt)
+                        // Publish progress as it happens, not only at the end.
+                        attempts = collected.toList()
+                        failoverNote = when {
+                            attempt.connected -> "Connected via ${attempt.endpoint.key}"
+                            attempt.mtu > 0 -> "Trying ${attempt.endpoint.key} · MTU ${attempt.mtu}"
+                            else -> "Probing ${attempt.endpoint.key}"
+                        }
+                    }
                 )
             }
 
-            // Publish the attempt log on the main thread, once.
             attempts = collected.toList()
             failoverNote = when {
                 outcome.connected && outcome.profile != null ->
-                    "Connected via ${outcome.profile.endpointLabel} \u00b7 MTU ${outcome.mtu}"
+                    "Connected via ${outcome.profile.endpointLabel} · MTU ${outcome.mtu}"
                 collected.isNotEmpty() ->
-                    "Tried ${collected.size} combination(s) \u2014 none came up"
+                    "Tried ${collected.size} combination(s) — none carried traffic"
                 else -> null
             }
 
@@ -266,18 +312,21 @@ class AppState(private val context: Context) {
                 activeMtu = outcome.mtu
                 connectedAt = TunnelController.connectedSince()
                 state = TunnelState.CONNECTED
-                // Remember what actually worked, so the next connect is instant.
+                trafficVerified = outcome.verified
+                verifiedLatencyMs = collected.lastOrNull { it.verified }?.verifyLatencyMs ?: 0L
                 store.lastGoodMtu = outcome.mtu
                 store.mtu = outcome.mtu
                 TransportCatalog.endpoints
                     .firstOrNull { it.key == outcome.profile.endpointLabel }
-                    ?.let { selectEndpoint(it) }
+                    ?.let { rememberWorkingEndpoint(it) }
                 speed.clear()
                 startPolling(scope)
+                startNotification(scope)
                 if (cfg.watchdog) startWatchdog(scope)
             } else {
                 error = outcome.error
                 state = TunnelState.ERROR
+                TunnelNotification.cancel(context)
             }
             busy = false
         }
@@ -295,6 +344,8 @@ class AppState(private val context: Context) {
             withContext(Dispatchers.IO) { runCatching { TunnelController.disconnect(context) } }
             stopPolling()
             stopWatchdog()
+            stopNotification()
+            TunnelNotification.cancel(context)
             if (started > 0) {
                 val rec = SessionRecord(
                     profileName = activeProfile?.name ?: "Aether Auto",
@@ -315,6 +366,8 @@ class AppState(private val context: Context) {
             stats = LiveStats()
             speed.clear()
             failoverNote = null
+            trafficVerified = false
+            verifiedLatencyMs = 0L
             state = TunnelState.DISCONNECTED
             busy = false
         }
@@ -341,10 +394,31 @@ class AppState(private val context: Context) {
         pollJob = null
     }
 
-    /**
-     * Reconnects when the tunnel claims to be up but nothing is moving. This is the
-     * difference between "connected" and "actually working" on a flaky mobile network.
-     */
+    /** Keeps the ongoing notification's numbers in step with the session. */
+    private fun startNotification(scope: CoroutineScope) {
+        stopNotification()
+        notifyJob = scope.launch {
+            while (true) {
+                val s = stats
+                val elapsed = if (connectedAt > 0) System.currentTimeMillis() - connectedAt else 0L
+                TunnelNotification.update(
+                    context = context,
+                    connected = state == TunnelState.CONNECTED,
+                    durationLabel = formatClock(elapsed),
+                    downLabel = formatSpeed(s.downBps),
+                    upLabel = formatSpeed(s.upBps),
+                    serverLabel = activeProfile?.endpointLabel ?: "Aether edge"
+                )
+                delay(2000)
+            }
+        }
+    }
+
+    private fun stopNotification() {
+        notifyJob?.cancel()
+        notifyJob = null
+    }
+
     private fun startWatchdog(scope: CoroutineScope) {
         stopWatchdog()
         watchdogJob = scope.launch {
@@ -352,9 +426,10 @@ class AppState(private val context: Context) {
                 delay(15_000)
                 if (state != TunnelState.CONNECTED) break
                 if (TunnelController.looksStalled()) {
-                    failoverNote = "Tunnel stalled \u2014 reconnecting\u2026"
+                    failoverNote = "Tunnel stalled — reconnecting…"
                     withContext(Dispatchers.IO) { runCatching { TunnelController.disconnect(context) } }
                     stopPolling()
+                    stopNotification()
                     state = TunnelState.DISCONNECTED
                     busy = false
                     connect(scope)
@@ -375,6 +450,28 @@ class AppState(private val context: Context) {
     fun lifetimeTx(): Long = sessions.sumOf { it.txBytes }
     fun lifetimeMs(): Long = sessions.sumOf { it.durationMs }
 
-    /** The best measured latency in the pool, or null when nothing has been probed. */
     fun bestLatency(): Long? = probeResults.values.minOrNull()
+
+    private fun formatClock(ms: Long): String {
+        val total = ms / 1000
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val s = total % 60
+        return if (h > 0) String.format("%d:%02d:%02d", h, m, s)
+        else String.format("%02d:%02d", m, s)
+    }
+
+    private fun formatSpeed(bps: Long): String {
+        val kbps = bps / 1024.0
+        return when {
+            kbps < 1 -> "0 KB/s"
+            kbps < 1000 -> String.format("%.0f KB/s", kbps)
+            else -> String.format("%.1f MB/s", kbps / 1024.0)
+        }
+    }
+
+    companion object {
+        /** Seeded on first run; the admin can change it in Settings → Admin. */
+        const val DEFAULT_ADMIN_PIN = "2468"
+    }
 }

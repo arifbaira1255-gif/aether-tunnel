@@ -55,9 +55,9 @@ data class TunnelProfile(
 }
 
 /**
- * The transport settings the user picked: which SNI host, which payload template and
- * which endpoint. Kept separate from [TunnelProfile] so the UI can show and edit them
- * without a live registration.
+ * The transport settings. In this build these are ADMIN-OWNED: the app ships with a
+ * working profile already selected, and the Settings screen is locked behind the admin
+ * PIN. A normal user never has to (and cannot) touch any of it.
  */
 data class TransportConfig(
     val sniId: String = "cf-engage",
@@ -66,22 +66,21 @@ data class TransportConfig(
     val customPayload: String = "",
     val endpointKey: String = "162.159.192.1:2408",
     val autoFailover: Boolean = true,
-    /** Which carrier profile the user is on — drives the recommended host/payload. */
     val carrier: Carrier = Carrier.AUTO,
-    /** Try the MTU ladder on a failed connect. */
     val autoMtu: Boolean = true,
-    /** Reconnect automatically when the tunnel drops. */
     val watchdog: Boolean = true,
-    /** DNS preset id, or "custom". */
-    val dnsId: String = "dns-cf"
+    val dnsId: String = "dns-cf",
+    /** Verify real traffic flows before declaring the tunnel connected. */
+    val verifyTraffic: Boolean = true,
+    /** Route IPv6 through the tunnel. Off by default: a broken IPv6 path is the
+     *  single most common cause of "connected but nothing loads". */
+    val routeIpv6: Boolean = false
 ) {
-    /** The SNI actually used: the custom one wins when it is set. */
     val effectiveSni: String
         get() = customSni.ifBlank {
             TransportCatalog.sniById(sniId)?.host ?: "engage.cloudflareclient.com"
         }
 
-    /** The payload template actually used. */
     val effectivePayloadTemplate: String
         get() = if (payloadId == "pl-custom") customPayload
         else TransportCatalog.payloadById(payloadId)?.template ?: ""
@@ -90,13 +89,12 @@ data class TransportConfig(
 /** The Pakistani carriers the app can tune itself for. */
 enum class Carrier(val title: String, val short: String, val flag: String) {
     AUTO("Auto-detect", "Auto", "\uD83C\uDF10"),
-    JAZZ("Jazz", "Jazz", "\uD83D\uDFE1"),
+    JAZZ("Jazz", "Jazz", "\uD83C\uDFE1"),
     TELENOR("Telenor", "Telenor", "\uD83D\uDD35"),
-    UFONE("Ufone", "Ufone", "\uD83D\uDFE0"),
-    ZONG("Zong", "Zong", "\uD83D\uDFE3"),
+    UFONE("Ufone", "Ufone", "\uD83C\uDFE0"),
+    ZONG("Zong", "Zong", "\uD83C\uDFE3"),
     OTHER("Other network", "Other", "\uD83C\uDF10");
 
-    /** The SNI host this carrier's profile starts on. */
     val defaultSniId: String
         get() = when (this) {
             JAZZ -> "pkj-selfcare"
@@ -106,7 +104,6 @@ enum class Carrier(val title: String, val short: String, val flag: String) {
             AUTO, OTHER -> "cf-engage"
         }
 
-    /** The payload this carrier's profile starts on. */
     val defaultPayloadId: String
         get() = when (this) {
             JAZZ -> "pl-jazz-selfcare"
@@ -138,7 +135,10 @@ data class LiveStats(
     val txBytes: Long = 0,
     val downBps: Long = 0,
     val upBps: Long = 0,
-    val handshakeAgeMs: Long = -1
+    val handshakeAgeMs: Long = -1,
+    /** Peak download seen this session, for the "top speed" readout. */
+    val peakDownBps: Long = 0,
+    val peakUpBps: Long = 0
 )
 
 /**
@@ -167,10 +167,7 @@ class SpeedHistory(val capacity: Int = 60) {
 
     val size: Int get() = count
 
-    /** Oldest-to-newest download samples. */
     fun downSeries(): List<Long> = series(down)
-
-    /** Oldest-to-newest upload samples. */
     fun upSeries(): List<Long> = series(up)
 
     private fun series(buf: LongArray): List<Long> {
@@ -181,7 +178,6 @@ class SpeedHistory(val capacity: Int = 60) {
         return out
     }
 
-    /** Peak download in the window, for scaling the graph. */
     fun peakDown(): Long = downSeries().maxOrNull() ?: 0L
     fun peakUp(): Long = upSeries().maxOrNull() ?: 0L
 }

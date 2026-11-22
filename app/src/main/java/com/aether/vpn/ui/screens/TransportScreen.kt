@@ -57,6 +57,7 @@ import com.aether.vpn.ui.components.SectionLabel
 import com.aether.vpn.ui.components.clickableNoRipple
 import com.aether.vpn.ui.theme.Amber
 import com.aether.vpn.ui.theme.Cyan
+import androidx.compose.material.icons.rounded.Lock
 import com.aether.vpn.ui.theme.Mint
 import com.aether.vpn.ui.theme.Rose
 import com.aether.vpn.ui.theme.TextFaint
@@ -73,6 +74,78 @@ private enum class TransportTab(val title: String) {
 fun TransportScreen(app: AppState) {
     var tab by remember { mutableStateOf(TransportTab.CARRIER) }
     val scope = rememberCoroutineScope()
+
+    // Admin-only surface. A normal user sees the active profile read-only on the
+    // Connect screen; nothing here can be changed without the PIN.
+    if (!app.adminUnlocked) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 20.dp)
+        ) {
+            Spacer(Modifier.height(14.dp))
+            Text("Transport", style = MaterialTheme.typography.headlineLarge, color = TextPrimary)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "Advanced tunnel configuration",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextTertiary
+            )
+            Spacer(Modifier.height(20.dp))
+            GlassCard(Modifier.fillMaxWidth(), accent = Amber) {
+                Column(Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Amber.copy(alpha = 0.14f))
+                                .border(1.dp, Amber.copy(alpha = 0.28f), RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Rounded.Lock, null,
+                                tint = Amber,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            "Administrator only",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = TextPrimary
+                        )
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "SNI hosts, payloads, endpoints, MTU and DNS are managed by the " +
+                            "administrator. The app already ships with a working profile, so " +
+                            "you do not need to change anything to connect.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    HairlineDivider()
+                    Spacer(Modifier.height(14.dp))
+                    KeyValueRow("SNI host", app.transport.effectiveSni, mono = true)
+                    Spacer(Modifier.height(9.dp))
+                    KeyValueRow("Endpoint", app.transport.endpointKey, mono = true)
+                    Spacer(Modifier.height(9.dp))
+                    KeyValueRow(
+                        "MTU",
+                        if (app.transport.autoMtu) "auto ladder" else "${app.store.mtu} fixed"
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "Unlock with the admin PIN in Settings to edit these.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextFaint
+                    )
+                }
+            }
+        }
+        return
+    }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         Spacer(Modifier.height(14.dp))

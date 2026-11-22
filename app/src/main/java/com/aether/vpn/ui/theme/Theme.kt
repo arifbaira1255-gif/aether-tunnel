@@ -9,45 +9,78 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aether.vpn.R
 
-// ---- Palette -------------------------------------------------------------
-// A deeper, richer base than a flat black: three ink levels so surfaces can stack
-// without borders, plus a warm-neutral text ramp that reads as expensive rather
-// than as pure grey.
+// ============================================================================
+//  Palette
+//
+//  A four-step ink ramp so surfaces can stack without a single border, and a
+//  text ramp that is warm-neutral rather than pure grey — that is what reads as
+//  expensive instead of as a developer default.
+// ============================================================================
 
-val Ink = Color(0xFF04050C)
-val InkSoft = Color(0xFF080A16)
-val Surface1 = Color(0xFF0E1122)
-val Surface2 = Color(0xFF151932)
-val Surface3 = Color(0xFF1C2140)
+val Ink        = Color(0xFF05060D)
+val InkSoft    = Color(0xFF090B16)
+val Surface1   = Color(0xFF0D1020)
+val Surface2   = Color(0xFF141830)
+val Surface3   = Color(0xFF1B2040)
+val Surface4   = Color(0xFF232A50)
 
-val Hairline = Color(0x14FFFFFF)
-val HairlineStrong = Color(0x2EFFFFFF)
-val HairlineTop = Color(0x3DFFFFFF)
+val Hairline       = Color(0x12FFFFFF)
+val HairlineStrong = Color(0x26FFFFFF)
+val HairlineTop    = Color(0x40FFFFFF)
 
-val Cyan = Color(0xFF3FE0F0)
-val CyanDeep = Color(0xFF12A8C4)
-val Violet = Color(0xFF8B5CF6)
+// Signature accents
+val Cyan       = Color(0xFF45E3F2)
+val CyanDeep   = Color(0xFF0FA5C2)
+val Indigo     = Color(0xFF6C7BFF)
+val Violet     = Color(0xFF9B6BFF)
 val VioletDeep = Color(0xFF5B2FD1)
-val Indigo = Color(0xFF6366F1)
-val Mint = Color(0xFF2FE3A0)
-val MintDeep = Color(0xFF0FA97A)
-val Amber = Color(0xFFFFC46B)
-val Rose = Color(0xFFFF5C7A)
-val Sky = Color(0xFF5AA9FF)
+val Mint       = Color(0xFF34E5A4)
+val MintDeep   = Color(0xFF0BA97A)
+val Amber      = Color(0xFFFFC46B)
+val Rose       = Color(0xFFFF5F7E)
+val Sky        = Color(0xFF5AA9FF)
+val Platinum   = Color(0xFFE8ECF8)
 
-val TextPrimary = Color(0xFFF6F7FC)
-val TextSecondary = Color(0xFFA2AACB)
-val TextTertiary = Color(0xFF6A7295)
-val TextFaint = Color(0xFF474E6B)
+val TextPrimary   = Color(0xFFF7F8FD)
+val TextSecondary = Color(0xFFA6AECF)
+val TextTertiary  = Color(0xFF6E7699)
+val TextFaint     = Color(0xFF4A5170)
 
-val BrandGradient = listOf(Cyan, Indigo, Violet)
+val BrandGradient     = listOf(Cyan, Indigo, Violet)
 val ConnectedGradient = listOf(Mint, Cyan)
-val WarmGradient = listOf(Amber, Rose)
+val WarmGradient      = listOf(Amber, Rose)
+val PlatinumGradient  = listOf(Color(0xFFFFFFFF), Color(0xFFB9C2E0))
 
-// ---- Type ----------------------------------------------------------------
+// ============================================================================
+//  Geometry — one scale, used everywhere, so nothing looks hand-placed.
+// ============================================================================
+
+object Radius {
+    val xs = 10.dp
+    val sm = 14.dp
+    val md = 20.dp
+    val lg = 26.dp
+    val xl = 32.dp
+    val pill = 100.dp
+}
+
+object Space {
+    val xs = 4.dp
+    val sm = 8.dp
+    val md = 12.dp
+    val lg = 16.dp
+    val xl = 20.dp
+    val xxl = 28.dp
+    val huge = 40.dp
+}
+
+// ============================================================================
+//  Type — Inter, with a tight display ramp and generous body leading.
+// ============================================================================
 
 val Inter = FontFamily(
     Font(R.font.inter_regular, FontWeight.Normal),
@@ -60,31 +93,31 @@ val Inter = FontFamily(
 private val AppTypography = Typography(
     displayLarge = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.ExtraBold,
-        fontSize = 52.sp, letterSpacing = (-2.0).sp, lineHeight = 56.sp
+        fontSize = 56.sp, letterSpacing = (-2.4).sp, lineHeight = 58.sp
     ),
     displayMedium = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.Bold,
-        fontSize = 38.sp, letterSpacing = (-1.2).sp, lineHeight = 42.sp
+        fontSize = 40.sp, letterSpacing = (-1.4).sp, lineHeight = 44.sp
     ),
     displaySmall = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.Bold,
-        fontSize = 30.sp, letterSpacing = (-0.8).sp, lineHeight = 34.sp
+        fontSize = 31.sp, letterSpacing = (-0.9).sp, lineHeight = 35.sp
     ),
     headlineLarge = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.Bold,
-        fontSize = 27.sp, letterSpacing = (-0.7).sp, lineHeight = 32.sp
+        fontSize = 28.sp, letterSpacing = (-0.8).sp, lineHeight = 33.sp
     ),
     headlineMedium = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.SemiBold,
-        fontSize = 21.sp, letterSpacing = (-0.4).sp, lineHeight = 26.sp
+        fontSize = 22.sp, letterSpacing = (-0.5).sp, lineHeight = 27.sp
     ),
     headlineSmall = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.SemiBold,
-        fontSize = 18.sp, letterSpacing = (-0.2).sp, lineHeight = 23.sp
+        fontSize = 18.5.sp, letterSpacing = (-0.3).sp, lineHeight = 24.sp
     ),
     titleLarge = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.SemiBold,
-        fontSize = 16.5.sp, letterSpacing = (-0.1).sp, lineHeight = 21.sp
+        fontSize = 16.5.sp, letterSpacing = (-0.15).sp, lineHeight = 21.sp
     ),
     titleMedium = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.Medium,
@@ -92,11 +125,11 @@ private val AppTypography = Typography(
     ),
     bodyLarge = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.Normal,
-        fontSize = 14.5.sp, lineHeight = 21.sp
+        fontSize = 14.5.sp, lineHeight = 22.sp
     ),
     bodyMedium = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.Normal,
-        fontSize = 13.sp, lineHeight = 19.sp
+        fontSize = 13.sp, lineHeight = 19.5.sp
     ),
     bodySmall = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.Normal,
@@ -112,7 +145,7 @@ private val AppTypography = Typography(
     ),
     labelSmall = TextStyle(
         fontFamily = Inter, fontWeight = FontWeight.SemiBold,
-        fontSize = 9.5.sp, letterSpacing = 1.1.sp
+        fontSize = 9.5.sp, letterSpacing = 1.2.sp
     )
 )
 
