@@ -31,7 +31,6 @@ import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -59,10 +58,8 @@ import com.aether.vpn.ui.screens.ConnectScreen
 import com.aether.vpn.ui.screens.ServerListScreen
 import com.aether.vpn.ui.screens.SettingsScreen
 import com.aether.vpn.ui.screens.StatsScreen
-import com.aether.vpn.ui.screens.TransportScreen
 import com.aether.vpn.ui.theme.AetherTheme
 import com.aether.vpn.ui.theme.Cyan
-import com.aether.vpn.ui.theme.Indigo
 import com.aether.vpn.ui.theme.Mint
 import com.aether.vpn.ui.theme.TextFaint
 import com.aether.vpn.ui.theme.TextTertiary
@@ -122,16 +119,17 @@ class MainActivity : ComponentActivity() {
                                 0 -> ConnectScreen(
                                     app = app,
                                     onOpenServers = { tab = 1 },
-                                    onOpenTransport = { tab = 2 },
                                     onConnect = { requestConnect(scope) },
                                     onDisconnect = { app.disconnect(scope) }
                                 )
-                                1 -> ServerListScreen(app) { endpoint ->
-                                    app.selectEndpoint(endpoint)
+                                1 -> ServerListScreen(app) { loc ->
+                                    // One tap: remember the location, then connect through the
+                                    // normal path so the VPN permission is requested first.
+                                    app.selectLocation(loc)
                                     tab = 0
+                                    requestConnect(scope)
                                 }
-                                2 -> TransportScreen(app)
-                                3 -> StatsScreen(app)
+                                2 -> StatsScreen(app)
                                 else -> SettingsScreen(app)
                             }
                         }
@@ -158,9 +156,8 @@ private fun BottomBar(selected: Int, connected: Boolean, onSelect: (Int) -> Unit
     val items = listOf(
         Triple("Connect", Icons.Rounded.Shield, 0),
         Triple("Servers", Icons.Rounded.Dns, 1),
-        Triple("Transport", Icons.Rounded.Tune, 2),
-        Triple("Usage", Icons.Rounded.BarChart, 3),
-        Triple("Settings", Icons.Rounded.Settings, 4)
+        Triple("Usage", Icons.Rounded.BarChart, 2),
+        Triple("Settings", Icons.Rounded.Settings, 3)
     )
     val accent = if (connected) Mint else Cyan
 

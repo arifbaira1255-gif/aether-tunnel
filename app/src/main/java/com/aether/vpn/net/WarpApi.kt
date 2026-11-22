@@ -33,8 +33,10 @@ object WarpApi {
      * hostnames over the years and a blocked one is common on mobile carriers, so a
      * single hard-coded URL is a single point of failure.
      */
+    private const val REG_BASE = "https://api.cloudflareclient.com/v0a2158/reg"
+
     private val REG_URLS = listOf(
-        "https://api.cloudflareclient.com/v0a2158/reg",
+        REG_BASE,
         "https://api.cloudflareclient.com/v0i1909051800/reg",
         "https://zero-trust-client.cloudflareclient.com/v0a2158/reg"
     )
@@ -57,7 +59,23 @@ object WarpApi {
         val addressV4: String,
         val addressV6: String?,
         val clientId: String,
-        val accountId: String
+        val accountId: String,
+        /** Device id from the registration response; needed to enable WARP on the device. */
+        val deviceId: String = "",
+        /** Bearer token from the registration response. */
+        val token: String = "",
+        /**
+         * Whether Cloudflare has WARP switched on for this device.
+         *
+         * THIS IS THE FIELD THAT DECIDES WHETHER THE TUNNEL CARRIES TRAFFIC.
+         * A fresh registration comes back with `warp_enabled: false`: the device exists,
+         * the keypair is valid, the peer answers a handshake - and every packet is then
+         * dropped, because the account is not enabled for WARP routing. The client has to
+         * PATCH the device with {"warp_enabled": true} before the tunnel will pass a
+         * single byte. Skipping that step is exactly the "connects but nothing loads"
+         * failure, and it is what this app used to do.
+         */
+        val warpEnabled: Boolean = false
     )
 
     /**
@@ -80,13 +98,62 @@ object WarpApi {
         var lastError: Throwable? = null
         for (url in REG_URLS) {
             val attempt = runCatching { post(url, body, keyPair, publicKey) }
-            attempt.getOrNull()?.let { return it }
+            val reg = attempt.getOrNull()
+            if (reg != null) {
+                // Registration alone is not enough - the device must be enabled for WARP
+                // routing or the tunnel comes up and drops every packet.
+                return enable(reg)
+            }
             lastError = attempt.exceptionOrNull()
         }
         throw IllegalStateException(
             "WARP registration failed on every host: ${lastError?.message ?: "unknown"}",
             lastError
         )
+    }
+
+    /**
+     * Turns WARP routing on for a registered device.
+     *
+     * `PATCH /reg/{id}` with `{"warp_enabled": true}` is the step that actually activates
+     * the account. It is idempotent, so it is safe to call on every connect - and it is
+     * called on every connect, because a device registered on a previous install (or one
+     * whose enable call failed) would otherwise stay disabled forever.
+     *
+     * Returns the registration with [Registration.warpEnabled] set to whatever Cloudflare
+     * reports afterwards. A failure here is not fatal: the tunnel is still attempted, and
+     * the traffic verification step reports honestly if nothing passes.
+     */
+    fun enable(reg: Registration): Registration {
+        if (reg.deviceId.isBlank() || reg.token.isBlank()) return reg
+        val attempt = runCatching {
+            val conn = (URL("$REG_BASE/${reg.deviceId}").openConnection() as HttpURLConnection).apply {
+                requestMethod = "PATCH"
+                connectTimeout = 15_000
+                readTimeout = 15_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("CF-Client-Version", CLIENT_VERSION)
+                setRequestProperty("User-Agent", "okhttp/3.12.1")
+                setRequestProperty("Authorization", "Bearer ${reg.token}")
+            }
+            try {
+                conn.outputStream.use { it.write("{\"warp_enabled\":true}".toByteArray()) }
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = stream?.let {
+                    BufferedReader(InputStreamReader(it)).use { r -> r.readText() }
+                } ?: ""
+                if (code !in 200..299) {
+                    throw IllegalStateException("WARP enable failed (HTTP $code): ${text.take(160)}")
+                }
+                val root = JSONObject(text)
+                reg.copy(warpEnabled = root.optBoolean("warp_enabled", true))
+            } finally {
+                conn.disconnect()
+            }
+        }
+        return attempt.getOrElse { reg }
     }
 
     private fun post(
@@ -129,7 +196,10 @@ object WarpApi {
                 addressV4 = addresses.getString("v4"),
                 addressV6 = addresses.optString("v6").takeIf { it.isNotBlank() },
                 clientId = config.optString("client_id"),
-                accountId = root.optJSONObject("account")?.optString("id").orEmpty()
+                accountId = root.optJSONObject("account")?.optString("id").orEmpty(),
+                deviceId = root.optString("id"),
+                token = root.optString("token"),
+                warpEnabled = root.optBoolean("warp_enabled", false)
             )
         } finally {
             conn.disconnect()
@@ -171,7 +241,7 @@ object WarpApi {
             addressV6 = reg.addressV6?.let { "$it/128" },
             dns = dns,
             mtu = mtu,
-            // IPv6 is only routed when the admin turned it on. Routing ::/0 over a
+            // IPv6 is only routed when the configuration enables it. Routing ::/0 over a
             // tunnel whose v6 path is broken is the #1 cause of "connected, nothing loads".
             allowedIps = if (transport.routeIpv6) listOf("0.0.0.0/0", "::/0")
             else listOf("0.0.0.0/0"),

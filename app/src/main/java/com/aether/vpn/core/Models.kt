@@ -23,9 +23,17 @@ data class TunnelProfile(
     val payload: String? = null,
     val sniId: String? = null,
     val payloadId: String? = null,
-    val isCustom: Boolean = false
+    val isCustom: Boolean = false,
+    /** Which [Location] this profile came from, so the UI can name it. */
+    val locationId: String = Locations.AUTO_ID
 ) {
     enum class Tier { FREE, PREMIUM }
+
+    /**
+     * What the user sees. Never an address: a name and a place.
+     * "United States · New York".
+     */
+    val serverTitle: String get() = if (city.isBlank()) country else "$country · $city"
 
     /** The wg-quick text form, so the user can export/share the profile. */
     fun toWgQuick(): String = buildString {
@@ -50,20 +58,21 @@ data class TunnelProfile(
         }
     }
 
-    /** Short "host:port" for the UI. */
-    val endpointLabel: String get() = "$endpointHost:$endpointPort"
 }
 
 /**
- * The transport settings. In this build these are ADMIN-OWNED: the app ships with a
- * working profile already selected, and the Settings screen is locked behind the admin
- * PIN. A normal user never has to (and cannot) touch any of it.
+ * Internal transport settings. The app ships with a working configuration already in
+ * place and maintains it itself; there is no settings panel for any of it. The user
+ * chooses a location on the Servers screen, and nothing else.
  */
 data class TransportConfig(
     val sniId: String = "cf-engage",
     val payloadId: String = "pl-none",
     val customSni: String = "",
     val customPayload: String = "",
+    /** The location the user picked on the Servers screen. */
+    val locationId: String = Locations.AUTO_ID,
+    /** The edge the failover engine last proved works. Internal; never shown as an IP. */
     val endpointKey: String = "162.159.192.1:2408",
     val autoFailover: Boolean = true,
     val carrier: Carrier = Carrier.AUTO,

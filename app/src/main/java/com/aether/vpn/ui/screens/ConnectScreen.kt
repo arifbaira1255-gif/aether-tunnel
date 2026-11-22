@@ -71,7 +71,6 @@ import kotlinx.coroutines.delay
 fun ConnectScreen(
     app: AppState,
     onOpenServers: () -> Unit,
-    onOpenTransport: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
@@ -212,9 +211,9 @@ fun ConnectScreen(
                 } else {
                     Text(
                         when {
-                            connected -> "Session time · MTU ${app.activeMtu}"
-                            connecting -> "Working through the endpoint pool"
-                            else -> "Session time"
+                            connected -> "Encrypted session"
+                            connecting -> "Finding the best server…"
+                            else -> "Ready when you are"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = TextFaint
@@ -342,16 +341,13 @@ fun ConnectScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        profile?.endpointLabel ?: "Auto-select on connect",
+                        app.activeServerTitle(),
                         style = MaterialTheme.typography.titleLarge,
                         color = TextPrimary
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        buildString {
-                            append("WireGuard · ChaCha20-Poly1305")
-                            if (app.activeMtu > 0) append(" · MTU ${app.activeMtu}")
-                        },
+                        "WireGuard · ChaCha20-Poly1305",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextFaint
                     )
@@ -366,33 +362,22 @@ fun ConnectScreen(
 
         Spacer(Modifier.height(12.dp))
 
-        // ---- Transport summary (read-only for users) ------------------------
+        // ---- Protection summary ---------------------------------------------
         GlassCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    SectionLabel("Active profile", accent = Violet)
-                    Text(
-                        "Managed",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = TextFaint
-                    )
-                }
+                SectionLabel("Your protection", accent = Violet)
                 Spacer(Modifier.height(12.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    MiniStat("Carrier", app.transport.carrier.short)
-                    MiniStat("SNI", app.transport.effectiveSni.take(22))
-                    MiniStat("DNS", app.transport.dnsId.removePrefix("dns-"))
+                    MiniStat("Encryption", "ChaCha20")
+                    MiniStat("Protocol", "WireGuard")
+                    MiniStat("Handshake", "Curve25519")
                 }
                 Spacer(Modifier.height(12.dp))
                 HairlineDivider()
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "These settings are locked by the administrator so the tunnel always " +
-                        "starts in a working configuration.",
+                    "The app keeps the tunnel in a working configuration for you \u2014 " +
+                        "no setup required. Just pick a server and connect.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextFaint
                 )
@@ -440,34 +425,27 @@ fun ConnectScreen(
                         )
                         Spacer(Modifier.width(9.dp))
                         Text(
-                            "Trying ${app.attempts.size} combination(s)",
+                            "Optimising your connection",
                             style = MaterialTheme.typography.titleMedium,
                             color = TextPrimary
                         )
                     }
                     Spacer(Modifier.height(10.dp))
-                    app.attempts.takeLast(3).forEach { a ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                a.endpoint.key,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = TextTertiary
-                            )
-                            Text(
-                                when {
-                                    a.connected -> "connected"
-                                    a.mtu > 0 -> "MTU ${a.mtu} · no traffic"
-                                    else -> "no reply"
-                                },
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (a.connected) Mint else TextFaint
-                            )
-                        }
+                    // Progress, in the user's terms: never an address, never an MTU.
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            "Checking the connection",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextTertiary
+                        )
+                        Text(
+                            "${app.attempts.count { it.connected }}/${app.attempts.size}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextFaint
+                        )
                     }
                 }
             }

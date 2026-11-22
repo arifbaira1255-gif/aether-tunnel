@@ -34,7 +34,10 @@ class AppStore(context: Context) {
                 addressV4 = o.getString("addressV4"),
                 addressV6 = o.optString("addressV6").takeIf { it.isNotBlank() },
                 clientId = o.optString("clientId"),
-                accountId = o.optString("accountId")
+                accountId = o.optString("accountId"),
+                deviceId = o.optString("deviceId"),
+                token = o.optString("token"),
+                warpEnabled = o.optBoolean("warpEnabled", false)
             )
         }.getOrNull()
     }
@@ -48,6 +51,9 @@ class AppStore(context: Context) {
             put("addressV6", reg.addressV6 ?: "")
             put("clientId", reg.clientId)
             put("accountId", reg.accountId)
+            put("deviceId", reg.deviceId)
+            put("token", reg.token)
+            put("warpEnabled", reg.warpEnabled)
         }
         prefs.edit().putString(KEY_REG, o.toString()).apply()
     }
@@ -132,6 +138,7 @@ class AppStore(context: Context) {
                 payloadId = o.optString("payloadId", "pl-none"),
                 customSni = o.optString("customSni", ""),
                 customPayload = o.optString("customPayload", ""),
+                locationId = o.optString("locationId", com.aether.vpn.core.Locations.AUTO_ID),
                 endpointKey = o.optString("endpointKey", "162.159.192.1:2408"),
                 autoFailover = o.optBoolean("autoFailover", true),
                 carrier = runCatching {
@@ -152,6 +159,7 @@ class AppStore(context: Context) {
             put("payloadId", config.payloadId)
             put("customSni", config.customSni)
             put("customPayload", config.customPayload)
+            put("locationId", config.locationId)
             put("endpointKey", config.endpointKey)
             put("autoFailover", config.autoFailover)
             put("carrier", config.carrier.name)
@@ -170,6 +178,22 @@ class AppStore(context: Context) {
         return TransportCatalog.endpoints.firstOrNull { it.key == key }
     }
 
+    /** The location the user picked, resolved against the catalogue. */
+    fun selectedLocation(): com.aether.vpn.core.Location? {
+        val id = transport().locationId
+        return if (id == com.aether.vpn.core.Locations.AUTO_ID) null
+        else com.aether.vpn.core.Locations.byId(id)
+    }
+
+    /** Remembers the location the user chose, and points the edge at it. */
+    fun selectLocation(loc: com.aether.vpn.core.Location) {
+        val next = transport().copy(
+            locationId = loc.id,
+            endpointKey = loc.key
+        )
+        saveTransport(next)
+    }
+
     // ---- probe results -----------------------------------------------------
 
     /** Cached reachability, so the server list can show real latency without re-probing. */
@@ -186,41 +210,6 @@ class AppStore(context: Context) {
         results.forEach { (k, v) -> o.put(k, v) }
         prefs.edit().putString(KEY_PROBES, o.toString()).apply()
     }
-
-    // ---- admin lock --------------------------------------------------------
-
-    /**
-     * The admin PIN. Everything that can break the tunnel (SNI, payload, endpoint, MTU,
-     * DNS, IPv6) is behind this, so a normal user cannot put the app into a state where
-     * it connects and then carries nothing.
-     *
-     * The PIN is stored as a salted SHA-256 hash, never in clear text. The default is
-     * set on first run and can be changed from the admin panel.
-     */
-    fun hasAdminPin(): Boolean = prefs.contains(KEY_ADMIN_HASH)
-
-    fun setAdminPin(pin: String) {
-        val salt = java.util.UUID.randomUUID().toString()
-        prefs.edit()
-            .putString(KEY_ADMIN_SALT, salt)
-            .putString(KEY_ADMIN_HASH, hashPin(pin, salt))
-            .apply()
-    }
-
-    fun checkAdminPin(pin: String): Boolean {
-        val salt = prefs.getString(KEY_ADMIN_SALT, null) ?: return false
-        val stored = prefs.getString(KEY_ADMIN_HASH, null) ?: return false
-        return stored == hashPin(pin, salt)
-    }
-
-    private fun hashPin(pin: String, salt: String): String {
-        val md = java.security.MessageDigest.getInstance("SHA-256")
-        val bytes = md.digest((salt + ":" + pin).toByteArray())
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
-
-    /** True once the admin has unlocked this session. Not persisted across restarts. */
-    var adminUnlocked: Boolean = false
 
     // ---- preferences -------------------------------------------------------
 
@@ -284,8 +273,6 @@ class AppStore(context: Context) {
         const val KEY_TRANSPORT = "transport_config"
         const val KEY_PROBES = "probe_results"
         const val KEY_GOOD_MTU = "last_good_mtu"
-        const val KEY_ADMIN_HASH = "admin_hash"
-        const val KEY_ADMIN_SALT = "admin_salt"
         const val MAX_SESSIONS = 100
     }
 }

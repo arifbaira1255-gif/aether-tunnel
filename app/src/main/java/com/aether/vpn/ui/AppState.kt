@@ -8,6 +8,8 @@ import androidx.compose.runtime.setValue
 import com.aether.vpn.core.Carrier
 import com.aether.vpn.core.Endpoint
 import com.aether.vpn.core.LiveStats
+import com.aether.vpn.core.Location
+import com.aether.vpn.core.Locations
 import com.aether.vpn.core.SessionRecord
 import com.aether.vpn.core.SpeedHistory
 import com.aether.vpn.core.TransportCatalog
@@ -49,7 +51,7 @@ class AppState(private val context: Context) {
     var connectedAt by mutableStateOf(0L)
         private set
 
-    /** The SNI / payload / endpoint selection. Admin-owned. */
+    /** Internal transport state. The app owns it; there is no settings panel for it. */
     var transport by mutableStateOf(store.transport())
         private set
 
@@ -77,10 +79,6 @@ class AppState(private val context: Context) {
     var activeMtu by mutableStateOf(0)
         private set
 
-    /** Admin session unlock. Not persisted — a restart re-locks the panel. */
-    var adminUnlocked by mutableStateOf(false)
-        private set
-
     val sessions = mutableStateListOf<SessionRecord>()
     val favourites = mutableStateListOf<String>()
 
@@ -92,8 +90,6 @@ class AppState(private val context: Context) {
         registration = store.registration()
         sessions.addAll(store.sessions())
         favourites.addAll(store.favourites())
-        // First run: seed the admin PIN so the panel is never open by default.
-        if (!store.hasAdminPin()) store.setAdminPin(DEFAULT_ADMIN_PIN)
         TunnelNotification.ensureChannel(context)
     }
 
@@ -109,42 +105,47 @@ class AppState(private val context: Context) {
         refreshFromStore()
     }
 
-    // ---- admin -------------------------------------------------------------
-
-    fun unlockAdmin(pin: String): Boolean {
-        val ok = store.checkAdminPin(pin)
-        if (ok) adminUnlocked = true
-        return ok
-    }
-
-    fun lockAdmin() { adminUnlocked = false }
-
-    fun changeAdminPin(current: String, next: String): Boolean {
-        if (!store.checkAdminPin(current)) return false
-        if (next.length < 4) return false
-        store.setAdminPin(next)
-        return true
-    }
-
-    // ---- transport editing (admin only) ------------------------------------
+    // ---- transport (internal; set by the app, not exposed as a panel) ------
 
     fun updateTransport(block: (TransportConfig) -> TransportConfig) {
-        if (!adminUnlocked) return
         val next = block(transport)
         transport = next
         store.saveTransport(next)
     }
 
-    fun selectEndpoint(endpoint: Endpoint) {
-        updateTransport { it.copy(endpointKey = endpoint.key) }
+    // ---- server locations (the user-facing choice) -------------------------
+
+    /** The location the user picked, or null for Automatic. */
+    fun selectedLocation(): Location? =
+        Locations.byId(transport.locationId).takeIf { transport.locationId != Locations.AUTO_ID }
+
+    /** What to show as the current server: a name and a place, never an address. */
+    fun activeServerTitle(): String =
+        activeProfile?.serverTitle
+            ?: selectedLocation()?.title
+            ?: "Automatic · Fastest reachable edge"
+
+    fun activeServerFlag(): String =
+        activeProfile?.flag ?: selectedLocation()?.flag ?: Locations.auto.flag
+
+    /**
+     * The user picked a location. Persisted immediately, so the choice survives a restart
+     * and is what the next connect uses.
+     */
+    fun selectLocation(loc: Location) {
+        store.selectLocation(loc)
+        transport = store.transport()
     }
 
     /**
-     * Remembers the endpoint that actually worked, regardless of who is signed in.
-     * The failover engine calls this after a verified connection, so the next connect
-     * starts from the edge that is known to work on this network.
+     * Remembers the edge that actually worked, so the next connect starts from something
+     * known-good on this network.
+     *
+     * Only remembered while the user is on Automatic. When they have pinned a location,
+     * its edge is the one they asked for and we do not silently move them somewhere else.
      */
     private fun rememberWorkingEndpoint(endpoint: Endpoint) {
+        if (transport.locationId != Locations.AUTO_ID) return
         val next = transport.copy(endpointKey = endpoint.key)
         transport = next
         store.saveTransport(next)
@@ -200,12 +201,14 @@ class AppState(private val context: Context) {
             store.saveProbeResults(reachable)
             probing = false
             if (reachable.isEmpty()) {
-                error = "No endpoint answered from this network. UDP may be blocked here."
+                error = "No server answered from this network. The tunnel may be blocked here."
             } else {
                 error = null
+                // Remember the fastest edge internally for Automatic. A pinned location
+                // keeps its own edge - the user asked for that one.
                 reachable.entries.minByOrNull { it.value }?.let { best ->
                     TransportCatalog.endpoints.firstOrNull { it.key == best.key }
-                        ?.let { selectEndpoint(it) }
+                        ?.let { rememberWorkingEndpoint(it) }
                 }
             }
         }
@@ -214,7 +217,20 @@ class AppState(private val context: Context) {
     // ---- registration ------------------------------------------------------
 
     suspend fun ensureRegistration(): WarpApi.Registration? {
-        registration?.let { return it }
+        // Re-enable WARP routing on every connect. The call is idempotent, and a device
+        // that registered on an earlier install (or whose enable call failed) would
+        // otherwise stay disabled and drop every packet - the classic "connected but
+        // nothing loads".
+        registration?.let { existing ->
+            return withContext(Dispatchers.IO) {
+                runCatching { WarpApi.enable(existing) }
+                    .onSuccess {
+                        if (it.warpEnabled != existing.warpEnabled) store.saveRegistration(it)
+                        registration = it
+                    }
+                    .getOrDefault(existing)
+            }
+        }
         return withContext(Dispatchers.IO) {
             runCatching { WarpApi.register() }
                 .onSuccess {
@@ -230,7 +246,7 @@ class AppState(private val context: Context) {
         val reg = registration ?: return null
         val endpoint = store.selectedEndpoint() ?: TransportCatalog.endpoints.first()
         val base = WarpApi.profileFrom(reg, endpoint, transport, store.mtu)
-        return store.applyPreferences(base)
+        return store.applyPreferences(base).namedFor(selectedLocation())
     }
 
     // ---- connect / disconnect ---------------------------------------------
@@ -269,6 +285,7 @@ class AppState(private val context: Context) {
                 null
             }
 
+            val loc = selectedLocation()
             val outcome = withContext(Dispatchers.IO) {
                 FailoverEngine.run(
                     config = cfg,
@@ -279,7 +296,7 @@ class AppState(private val context: Context) {
                         store.applyPreferences(
                             WarpApi.profileFrom(reg, endpoint, transportCfg, mtu),
                             mtu
-                        )
+                        ).namedFor(loc)
                     },
                     connect = { profile -> TunnelController.connect(context, profile) },
                     disconnect = { runCatching { TunnelController.disconnect(context) } },
@@ -289,23 +306,18 @@ class AppState(private val context: Context) {
                         collected.add(attempt)
                         // Publish progress as it happens, not only at the end.
                         attempts = collected.toList()
+                        // The user sees progress, never an address.
                         failoverNote = when {
-                            attempt.connected -> "Connected via ${attempt.endpoint.key}"
-                            attempt.mtu > 0 -> "Trying ${attempt.endpoint.key} · MTU ${attempt.mtu}"
-                            else -> "Probing ${attempt.endpoint.key}"
+                            attempt.connected -> "Connected"
+                            attempt.mtu > 0 -> "Optimising the tunnel…"
+                            else -> "Trying the next server…"
                         }
                     }
                 )
             }
 
             attempts = collected.toList()
-            failoverNote = when {
-                outcome.connected && outcome.profile != null ->
-                    "Connected via ${outcome.profile.endpointLabel} · MTU ${outcome.mtu}"
-                collected.isNotEmpty() ->
-                    "Tried ${collected.size} combination(s) — none carried traffic"
-                else -> null
-            }
+            failoverNote = if (outcome.connected) null else failoverNote
 
             if (outcome.connected && outcome.profile != null) {
                 activeProfile = outcome.profile
@@ -317,7 +329,10 @@ class AppState(private val context: Context) {
                 store.lastGoodMtu = outcome.mtu
                 store.mtu = outcome.mtu
                 TransportCatalog.endpoints
-                    .firstOrNull { it.key == outcome.profile.endpointLabel }
+                    .firstOrNull {
+                        it.host == outcome.profile.endpointHost &&
+                            it.port == outcome.profile.endpointPort
+                    }
                     ?.let { rememberWorkingEndpoint(it) }
                 speed.clear()
                 startPolling(scope)
@@ -340,7 +355,7 @@ class AppState(private val context: Context) {
             val started = connectedAt
             val finalStats = stats
             val mtu = activeMtu
-            val endpoint = activeProfile?.endpointLabel ?: ""
+            val endpoint = activeProfile?.serverTitle ?: ""
             withContext(Dispatchers.IO) { runCatching { TunnelController.disconnect(context) } }
             stopPolling()
             stopWatchdog()
@@ -407,7 +422,7 @@ class AppState(private val context: Context) {
                     durationLabel = formatClock(elapsed),
                     downLabel = formatSpeed(s.downBps),
                     upLabel = formatSpeed(s.upBps),
-                    serverLabel = activeProfile?.endpointLabel ?: "Aether edge"
+                    serverLabel = activeProfile?.serverTitle ?: "Automatic"
                 )
                 delay(2000)
             }
@@ -444,6 +459,18 @@ class AppState(private val context: Context) {
         watchdogJob = null
     }
 
+    /**
+     * Names a profile after the chosen location. The profile keeps its real address
+     * internally - the UI only ever shows the country and city.
+     */
+    private fun TunnelProfile.namedFor(loc: Location?): TunnelProfile = copy(
+        country = loc?.country ?: "Automatic",
+        city = loc?.city ?: "Fastest reachable edge",
+        flag = loc?.flag ?: Locations.auto.flag,
+        locationId = loc?.id ?: Locations.AUTO_ID,
+        name = loc?.title ?: "Automatic"
+    )
+
     // ---- lifetime totals ---------------------------------------------------
 
     fun lifetimeRx(): Long = sessions.sumOf { it.rxBytes }
@@ -470,8 +497,4 @@ class AppState(private val context: Context) {
         }
     }
 
-    companion object {
-        /** Seeded on first run; the admin can change it in Settings → Admin. */
-        const val DEFAULT_ADMIN_PIN = "2468"
-    }
 }

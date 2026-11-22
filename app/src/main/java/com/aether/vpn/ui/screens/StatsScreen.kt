@@ -63,7 +63,7 @@ fun StatsScreen(app: AppState) {
 
     // Top endpoints by bytes moved.
     val byEndpoint = sessions
-        .groupBy { it.endpoint.ifBlank { "auto" } }
+        .groupBy { it.endpoint.ifBlank { "Automatic" } }
         .mapValues { (_, list) -> list.sumOf { it.rxBytes + it.txBytes } }
         .toList()
         .sortedByDescending { it.second }
@@ -255,7 +255,7 @@ private fun SessionRow(s: SessionRecord) {
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    s.endpoint.ifBlank { "Auto edge" },
+                    s.endpoint.ifBlank { "Automatic" },
                     style = MaterialTheme.typography.titleMedium,
                     color = TextPrimary,
                     fontWeight = FontWeight.SemiBold
