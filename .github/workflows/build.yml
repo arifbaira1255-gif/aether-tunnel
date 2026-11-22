@@ -52,63 +52,34 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
-      # The release APK must be signed with the committed keystore. The debug APK is
-      # deliberately signed with the debug key (it is a separate app, .debug suffix),
-      # so only the release APK is checked here.
+      # The release APK must be signed with the committed keystore, otherwise Android
+      # refuses to update an installed build ("App not installed"). apksigner is the
+      # authoritative tool for this, so use it rather than hand-parsing the APK.
+      # The debug APK is deliberately signed with the debug key (separate .debug app),
+      # so only the release APK is checked.
       - name: Verify release APK signing certificate
         run: |
           set -e
-          python3 - <<'PY'
-          import struct, hashlib, glob, sys
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          echo "apksigner: $APKSIGNER"
 
-          EXPECTED = "28035d072b5e6befec862b3a0c5f118dd063b3cd64939ec4400d15159f3b17d1"
+          keytool -exportcert -keystore keystore/release.jks -storepass aethertunnel -alias aether \
+            | sha256sum | awk '{print $1}' > /tmp/keystore.sha
+          echo "committed keystore cert SHA-256: $(cat /tmp/keystore.sha)"
 
-          def cert_sha256(path):
-              d = open(path, 'rb').read()
-              eocd = d.rfind(b'PK\x05\x06')
-              cd_size, cd_off = struct.unpack_from('<II', d, eocd + 12)
-              if d[cd_off - 16:cd_off] != b'APK Sig Block 42':
-                  return None
-              size = struct.unpack_from('<Q', d, cd_off - 24)[0]
-              start = cd_off - size - 8
-              block = d[start:cd_off - 16]
-              pos, out = 8, {}
-              while pos < len(block) - 8:
-                  ln = struct.unpack_from('<Q', block, pos)[0]
-                  if ln == 0:
-                      break
-                  idv = block[pos + 8:pos + 8 + ln]
-                  out[struct.unpack_from('<I', idv, 0)[0]] = idv[4:]
-                  pos += 8 + ln
-              v2 = out.get(0x7109871a)
-              if not v2:
-                  return None
-              p = 0
-              slen = struct.unpack_from('<I', v2, p)[0]; p += 4
-              signer = v2[p:p + slen]
-              q = 0
-              sdlen = struct.unpack_from('<I', signer, q)[0]; q += 4
-              sd = signer[q:q + sdlen]
-              r = 0
-              dlen = struct.unpack_from('<I', sd, r)[0]; r += 4
-              r += dlen
-              clen = struct.unpack_from('<I', sd, r)[0]; r += 4
-              certs = sd[r:r + clen]
-              c0len = struct.unpack_from('<I', certs, 0)[0]
-              return hashlib.sha256(certs[4:4 + c0len]).hexdigest()
-
-          rel = glob.glob('app/build/outputs/apk/release/*.apk')
-          if not rel:
-              print('ERROR: no release APK produced'); sys.exit(1)
-          for a in rel:
-              h = cert_sha256(a)
-              print(f'{a}  ->  {h}')
-              if h != EXPECTED:
-                  print('ERROR: release APK is NOT signed with the committed keystore.')
-                  print('       Android will refuse to update an installed build.')
-                  sys.exit(1)
-          print('OK: release APK signed with the committed keystore (stable across builds)')
-          PY
+          for apk in app/build/outputs/apk/release/*.apk; do
+            echo "--- $apk"
+            "$APKSIGNER" verify --print-certs "$apk" | grep -i "SHA-256 digest" | head -1
+            "$APKSIGNER" verify --print-certs "$apk" \
+              | grep -i "SHA-256 digest" | head -1 | awk '{print $NF}' > /tmp/apk.sha
+            echo "apk cert SHA-256: $(cat /tmp/apk.sha)"
+            if [ "$(cat /tmp/keystore.sha)" != "$(cat /tmp/apk.sha)" ]; then
+              echo "ERROR: release APK is NOT signed with the committed keystore."
+              echo "       Android would refuse to update an installed build."
+              exit 1
+            fi
+          done
+          echo "OK: release APK signed with the committed keystore (stable across builds)"
 
       - name: Collect APKs
         run: |
