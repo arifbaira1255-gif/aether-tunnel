@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aether.vpn.core.Location
 import com.aether.vpn.core.Locations
+import com.aether.vpn.core.TunnelState
 import com.aether.vpn.ui.AppState
 import com.aether.vpn.ui.components.Chip
 import com.aether.vpn.ui.components.EmptyBlock
@@ -183,7 +184,7 @@ fun ServerListScreen(app: AppState, onPick: (Location) -> Unit) {
                         loc = loc,
                         selected = loc.id == selectedId,
                         favourite = app.favourites.contains(loc.id),
-                        connecting = app.state == com.aether.vpn.service.TunnelState.CONNECTING &&
+                        connecting = app.state == TunnelState.CONNECTING &&
                             loc.id == selectedId,
                         onFavourite = { app.toggleFavourite(loc.id) },
                         onClick = { onPick(loc) }
