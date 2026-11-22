@@ -52,11 +52,16 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Verify both APKs share one signing certificate
+      # The release APK must be signed with the committed keystore. The debug APK is
+      # deliberately signed with the debug key (it is a separate app, .debug suffix),
+      # so only the release APK is checked here.
+      - name: Verify release APK signing certificate
         run: |
           set -e
           python3 - <<'PY'
           import struct, hashlib, glob, sys
+
+          EXPECTED = "28035d072b5e6befec862b3a0c5f118dd063b3cd64939ec4400d15159f3b17d1"
 
           def cert_sha256(path):
               d = open(path, 'rb').read()
@@ -92,17 +97,17 @@ jobs:
               c0len = struct.unpack_from('<I', certs, 0)[0]
               return hashlib.sha256(certs[4:4 + c0len]).hexdigest()
 
-          apks = sorted(glob.glob('app/build/outputs/apk/**/*.apk', recursive=True))
-          if not apks:
-              print('no APKs found'); sys.exit(1)
-          seen = {}
-          for a in apks:
+          rel = glob.glob('app/build/outputs/apk/release/*.apk')
+          if not rel:
+              print('ERROR: no release APK produced'); sys.exit(1)
+          for a in rel:
               h = cert_sha256(a)
               print(f'{a}  ->  {h}')
-              seen[a] = h
-          if len(set(seen.values())) != 1:
-              print('ERROR: APKs are signed with different certificates'); sys.exit(1)
-          print('OK: all APKs share one signing certificate')
+              if h != EXPECTED:
+                  print('ERROR: release APK is NOT signed with the committed keystore.')
+                  print('       Android will refuse to update an installed build.')
+                  sys.exit(1)
+          print('OK: release APK signed with the committed keystore (stable across builds)')
           PY
 
       - name: Collect APKs
