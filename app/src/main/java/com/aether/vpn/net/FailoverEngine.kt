@@ -91,13 +91,28 @@ object FailoverEngine {
         pool: List<Endpoint> = TransportCatalog.endpoints,
         latencies: Map<String, Long> = emptyMap()
     ): List<Endpoint> {
-        val ordered = pool.sortedWith(
+        // Group by address, order the addresses by measured latency (unknown last), and
+        // within each address walk the ports in priority order.
+        //
+        // WHY BY ADDRESS AND NOT BY PORT: a carrier blocks a PORT far more often than it
+        // blocks an address - UDP 2408 is the usual casualty. Ordering by port first would
+        // try all 40 addresses on 2408 (every one failing) before it ever reached port
+        // 500, and with a bounded attempt budget it would never reach it at all. Ordering
+        // by address means the first eight attempts are one address across all eight
+        // ports, so a blocked port is discovered in seconds and the working port is found
+        // on the same address.
+        val byHost = pool.groupBy { it.host }
+        val hosts = byHost.keys.sortedWith(
             compareBy(
-                { TransportCatalog.portPriority(it.port) },
-                { latencies[it.key] ?: Long.MAX_VALUE },
-                { it.host }
+                { latencies[byHost[it]!!.first().key] ?: Long.MAX_VALUE },
+                { it }
             )
         )
+        val ordered = ArrayList<Endpoint>(pool.size)
+        hosts.forEach { host ->
+            byHost[host]!!.sortedBy { TransportCatalog.portPriority(it.port) }
+                .forEach { ordered.add(it) }
+        }
         if (preferred == null) return ordered
         return listOf(preferred) + ordered.filter { it.key != preferred.key }
     }
@@ -124,8 +139,7 @@ object FailoverEngine {
         connect: (TunnelProfile) -> Unit,
         disconnect: () -> Unit,
         verify: (() -> Verify)? = null,
-        maxAttempts: Int = 24,
-        probeTimeoutMs: Int = 1200,
+        maxAttempts: Int = 40,
         budgetMs: Long = 75_000,
         latencies: Map<String, Long> = emptyMap(),
         onAttempt: ((Attempt) -> Unit)? = null
@@ -145,11 +159,14 @@ object FailoverEngine {
         for (endpoint in queue) {
             if (outOfTime()) break
 
-            // The probe only ORDERS the queue; it never blocks a candidate. A TCP 443
-            // connect that fails does not mean WARP's UDP port is blocked, so we still
-            // try the tunnel.
-            val probe = TunnelProbe.probe(endpoint, probeTimeoutMs)
-            if (probe.reachable) sawReachable = true
+            // No probe here on purpose. The queue is already ordered by the cached
+            // latencies, and a fresh TCP connect per candidate would spend ~1.2 s of a
+            // fixed budget on every endpoint - which is the difference between reaching
+            // the working server and timing out before it. Reachability is read from the
+            // cache instead.
+            val probeReachable = latencies.containsKey(endpoint.key)
+            if (probeReachable) sawReachable = true
+            val probeLatency = latencies[endpoint.key] ?: 0L
 
             for (mtu in mtus) {
                 if (outOfTime()) break
@@ -160,8 +177,8 @@ object FailoverEngine {
                     runCatching { disconnect() }
                     val a = Attempt(
                         endpoint = endpoint,
-                        probed = probe.reachable,
-                        probeLatencyMs = probe.latencyMs,
+                        probed = probeReachable,
+                        probeLatencyMs = probeLatency,
                         connected = false,
                         error = result.exceptionOrNull()?.message ?: "Tunnel refused",
                         mtu = mtu,
@@ -186,8 +203,8 @@ object FailoverEngine {
                 if (check.ok) {
                     val a = Attempt(
                         endpoint = endpoint,
-                        probed = probe.reachable,
-                        probeLatencyMs = probe.latencyMs,
+                        probed = probeReachable,
+                        probeLatencyMs = probeLatency,
                         connected = true,
                         mtu = mtu,
                         verified = true,
@@ -216,8 +233,8 @@ object FailoverEngine {
                 }
                 val a = Attempt(
                     endpoint = endpoint,
-                    probed = probe.reachable,
-                    probeLatencyMs = probe.latencyMs,
+                    probed = probeReachable,
+                    probeLatencyMs = probeLatency,
                     connected = false,
                     error = msg,
                     mtu = mtu,
