@@ -375,17 +375,27 @@ class AppState(private val context: Context) {
                     // and the keys agree; the request says data actually flows. Reporting
                     // them separately is what lets the engine tell "blocked server" apart
                     // from "packet size too big", and therefore what to try next.
-                    val handshake = TunnelController.awaitHandshake(context, 4000)
+                    // Timeouts are deliberately tight. A failover search has a fixed
+                    // wall-clock budget, and a generous per-attempt timeout means the
+                    // FIRST dead endpoint eats the whole budget and the user never gets
+                    // to the one that works. 3 s for the handshake and 3.5 s per request
+                    // is enough on any real network and keeps each attempt near 7 s.
+                    val handshake = TunnelController.awaitHandshake(context, 3000)
                     if (handshake) handshakeSeen = true
-                    val check = ConnectivityVerifier.check(timeoutMs = 5000, rounds = 2)
+                    val check = ConnectivityVerifier.check(timeoutMs = 3500, rounds = 1)
                     if (check.ok) {
                         trafficSeen = true
                         lastVerifyDetail = check.detail
                     } else if (lastVerifyDetail.isBlank()) {
                         lastVerifyDetail = check.detail
                     }
+                    // Traffic is the ONLY gate. The handshake flag is used solely to
+                    // decide what to try next (smaller MTU vs. a different server), so a
+                    // handshake we could not observe must never fail a tunnel that is
+                    // demonstrably carrying data. Reading it the other way round is what
+                    // makes an app reject working tunnels.
                     FailoverEngine.Verify(
-                        handshakeOk = handshake,
+                        handshakeOk = handshake || check.ok,
                         trafficOk = check.ok,
                         detail = check.detail
                     )

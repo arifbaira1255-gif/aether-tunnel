@@ -244,7 +244,11 @@ object TunnelController {
         val s = _stats.value
         val upFor = if (connectedAt > 0) System.currentTimeMillis() - connectedAt else 0L
 
-        if (s.handshakeAgeMs > staleHandshakeMs) return true
+        // handshakeAgeMs is -1 when the backend has not reported a peer yet. That is
+        // "unknown", not "stale" - treating it as stale would tear down a perfectly good
+        // tunnel on the first poll after connect, which is exactly the reconnect loop
+        // users describe as "it connects then immediately drops".
+        if (s.handshakeAgeMs >= 0 && s.handshakeAgeMs > staleHandshakeMs) return true
         if (s.rxBytes + s.txBytes == 0L && upFor > idleMs) return true
         return false
     }
