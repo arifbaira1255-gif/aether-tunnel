@@ -446,7 +446,7 @@ object TransportCatalog {
             "188.114.98.1", "188.114.98.2", "188.114.98.3", "188.114.98.4",
             "188.114.99.1", "188.114.99.2", "188.114.99.3", "188.114.99.4"
         )
-        val ports = listOf(2408, 500, 1701, 4500)
+        val ports = listOf(2408, 500, 1701, 4500, 854, 859, 880, 890)
         hosts.forEach { h ->
             ports.forEach { p ->
                 add(Endpoint(h, p, if (p == 2408) "Primary" else "Fallback $p"))
@@ -454,9 +454,31 @@ object TransportCatalog {
         }
     }
 
+    /**
+     * Port order for the failover queue.
+     *
+     * 2408 is Cloudflare's documented WARP port and works on most networks. 500 / 1701 /
+     * 4500 are the other ports Cloudflare publishes, and they are the ones that survive
+     * carriers which block 2408. 854 / 859 / 880 / 890 are the extra ports that some
+     * carrier firewalls leave open because they look like DNS-over-TLS / HTTPS traffic.
+     * Trying them in this order means the common case is fast and the blocked case still
+     * has somewhere to go.
+     */
+    fun portPriority(port: Int): Int = when (port) {
+        2408 -> 0
+        500 -> 1
+        1701 -> 2
+        4500 -> 3
+        854 -> 4
+        859 -> 5
+        880 -> 6
+        890 -> 7
+        else -> 8
+    }
+
     /** The default order: primary port first, then the fallbacks. */
     fun defaultOrder(): List<Endpoint> =
-        endpoints.sortedWith(compareBy({ if (it.port == 2408) 0 else 1 }, { it.host }))
+        endpoints.sortedWith(compareBy({ portPriority(it.port) }, { it.host }))
 
     // ---- MTU ladder --------------------------------------------------------
 

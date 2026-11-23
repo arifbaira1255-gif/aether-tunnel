@@ -9,21 +9,28 @@ import com.aether.vpn.core.TunnelProfile
  * Brings the tunnel up by trying endpoint after endpoint until one actually carries
  * traffic.
  *
- * The order is: the endpoint the user picked, then every other endpoint in the pool,
- * primary port (2408) before the fallbacks (500 / 1701 / 4500). Each candidate is probed
- * with a real WireGuard handshake first, so a blocked port is skipped in about a second
- * instead of hanging the connect button.
+ * WHAT CHANGED AND WHY
+ * --------------------
+ * The old version probed every candidate with a hand-made WireGuard handshake packet and
+ * SKIPPED any endpoint that did not answer. That probe could never get an answer (see
+ * [TunnelProbe] for the mac1 reason), so every candidate was skipped and the app never
+ * brought a tunnel up at all. The probe is no longer a gate: it only sorts the queue.
  *
- * Then, and this is the part that matters, each candidate that answers is brought up and
- * VERIFIED: we wait for a completed handshake and then make a real HTTP request through
- * the tunnel. A tunnel that comes up but cannot fetch a page is torn down and the next
- * candidate is tried. That is what stops the app from showing a green light over a dead
- * connection.
+ * The only thing that decides success now is the tunnel itself:
+ *   1. the backend reports UP,
+ *   2. the peer completed a real handshake (WireGuard's own latestHandshakeEpochMillis),
+ *   3. a real HTTP request made through the tunnel comes back.
  *
- * On top of that, each reachable endpoint is tried across the MTU ladder. A network that
- * silently drops large packets will accept the handshake and then stall — the classic
- * "connects but nothing loads, and what does load is slow". Stepping the MTU down from
- * 1420 to 1200 is what gets past it, and the value that worked is remembered.
+ * If any of those fails, the tunnel is torn down and the next combination is tried -
+ * automatically, without the user pressing connect again.
+ *
+ * The search space is (endpoint x port x MTU). Ports are walked in the order Cloudflare
+ * documents for WARP plus the extra ones that survive carrier firewalls. MTU is walked
+ * down the ladder, because a network that silently drops large packets accepts the
+ * handshake and then stalls.
+ *
+ * A global deadline keeps a hopeless network from spinning forever: the loop stops when
+ * the budget is spent and reports honestly what it saw.
  */
 object FailoverEngine {
 
@@ -35,7 +42,9 @@ object FailoverEngine {
         val error: String? = null,
         val mtu: Int = 0,
         val verified: Boolean = false,
-        val verifyLatencyMs: Long = 0
+        val verifyLatencyMs: Long = 0,
+        /** Which stage failed: "up", "handshake", "traffic", "ok". */
+        val stage: String = ""
     )
 
     data class Outcome(
@@ -44,12 +53,50 @@ object FailoverEngine {
         val attempts: List<Attempt>,
         val error: String? = null,
         val mtu: Int = 0,
-        val verified: Boolean = false
+        val verified: Boolean = false,
+        /** Machine-readable reason, for the diagnostics screen. */
+        val failureKind: FailureKind = FailureKind.NONE
     )
 
-    fun candidates(preferred: Endpoint?, pool: List<Endpoint> = TransportCatalog.endpoints): List<Endpoint> {
+    /**
+     * What the verification step saw. Two separate facts, because they call for different
+     * next actions: no handshake means this endpoint is blocked (move on), a handshake
+     * with no traffic means the path is up but the packet size is wrong (try a smaller
+     * MTU on the SAME endpoint).
+     */
+    data class Verify(
+        val handshakeOk: Boolean,
+        val trafficOk: Boolean,
+        val detail: String = ""
+    ) {
+        val ok: Boolean get() = handshakeOk && trafficOk
+    }
+
+    enum class FailureKind {
+        NONE,
+        REGISTRATION,
+        UNREACHABLE,
+        NO_HANDSHAKE,
+        NO_TRAFFIC,
+        BACKEND,
+        TIMEOUT
+    }
+
+    /**
+     * The candidate queue: the user's chosen edge first, then everything else, ordered by
+     * port priority and then by measured latency where we have it.
+     */
+    fun candidates(
+        preferred: Endpoint?,
+        pool: List<Endpoint> = TransportCatalog.endpoints,
+        latencies: Map<String, Long> = emptyMap()
+    ): List<Endpoint> {
         val ordered = pool.sortedWith(
-            compareBy({ if (it.port == 2408) 0 else 1 }, { it.host }, { it.port })
+            compareBy(
+                { TransportCatalog.portPriority(it.port) },
+                { latencies[it.key] ?: Long.MAX_VALUE },
+                { it.host }
+            )
         )
         if (preferred == null) return ordered
         return listOf(preferred) + ordered.filter { it.key != preferred.key }
@@ -62,10 +109,11 @@ object FailoverEngine {
     }
 
     /**
-     * Runs the failover loop. Blocking — call from Dispatchers.IO.
+     * Runs the failover loop. Blocking - call from Dispatchers.IO.
      *
      * @param verify called after the tunnel is up; returns true when real traffic flowed.
      * @param maxAttempts caps the endpoint loop so a hopeless network fails fast.
+     * @param budgetMs overall wall-clock budget for the whole search.
      */
     fun run(
         config: TransportConfig,
@@ -75,64 +123,76 @@ object FailoverEngine {
         buildProfile: (Endpoint, TransportConfig, Int) -> TunnelProfile,
         connect: (TunnelProfile) -> Unit,
         disconnect: () -> Unit,
-        verify: (() -> Boolean)? = null,
-        maxAttempts: Int = 12,
+        verify: (() -> Verify)? = null,
+        maxAttempts: Int = 24,
         probeTimeoutMs: Int = 1200,
+        budgetMs: Long = 75_000,
+        latencies: Map<String, Long> = emptyMap(),
         onAttempt: ((Attempt) -> Unit)? = null
     ): Outcome {
+        val startedAt = System.currentTimeMillis()
         val attempts = ArrayList<Attempt>()
-        val queue = candidates(preferred).take(maxAttempts)
+        val queue = candidates(preferred, latencies = latencies).take(maxAttempts)
         val mtus = mtuLadder(lastGoodMtu, config.autoMtu, fixedMtu)
 
-        var lastVerifyError: String? = null
+        var sawReachable = false
+        var sawUp = false
+        var sawHandshake = false
+        var lastError: String? = null
+
+        fun outOfTime() = System.currentTimeMillis() - startedAt > budgetMs
 
         for (endpoint in queue) {
+            if (outOfTime()) break
+
+            // The probe only ORDERS the queue; it never blocks a candidate. A TCP 443
+            // connect that fails does not mean WARP's UDP port is blocked, so we still
+            // try the tunnel.
             val probe = TunnelProbe.probe(endpoint, probeTimeoutMs)
-            if (!probe.reachable) {
-                val a = Attempt(
-                    endpoint = endpoint,
-                    probed = true,
-                    probeLatencyMs = probe.latencyMs,
-                    connected = false,
-                    error = probe.error ?: "No handshake reply"
-                )
-                attempts.add(a)
-                onAttempt?.invoke(a)
-                continue
-            }
+            if (probe.reachable) sawReachable = true
 
             for (mtu in mtus) {
+                if (outOfTime()) break
+
                 val profile = buildProfile(endpoint, config, mtu)
                 val result = runCatching { connect(profile) }
                 if (result.isFailure) {
                     runCatching { disconnect() }
                     val a = Attempt(
                         endpoint = endpoint,
-                        probed = true,
+                        probed = probe.reachable,
                         probeLatencyMs = probe.latencyMs,
                         connected = false,
                         error = result.exceptionOrNull()?.message ?: "Tunnel refused",
-                        mtu = mtu
+                        mtu = mtu,
+                        stage = "up"
                     )
                     attempts.add(a)
                     onAttempt?.invoke(a)
+                    lastError = a.error
                     continue
                 }
 
+                sawUp = true
+
                 // The tunnel is up. Now prove it works.
                 val verifyStart = System.currentTimeMillis()
-                val verified = if (verify == null) true else runCatching { verify() }.getOrElse { false }
+                val check = if (verify == null) Verify(true, true)
+                else runCatching { verify() }.getOrElse { Verify(false, false, "verify threw") }
                 val verifyMs = System.currentTimeMillis() - verifyStart
 
-                if (verified) {
+                if (check.handshakeOk) sawHandshake = true
+
+                if (check.ok) {
                     val a = Attempt(
                         endpoint = endpoint,
-                        probed = true,
+                        probed = probe.reachable,
                         probeLatencyMs = probe.latencyMs,
                         connected = true,
                         mtu = mtu,
                         verified = true,
-                        verifyLatencyMs = verifyMs
+                        verifyLatencyMs = verifyMs,
+                        stage = "ok"
                     )
                     attempts.add(a)
                     onAttempt?.invoke(a)
@@ -141,39 +201,71 @@ object FailoverEngine {
                         profile = profile,
                         attempts = attempts,
                         mtu = mtu,
-                        verified = true
+                        verified = true,
+                        failureKind = FailureKind.NONE
                     )
                 }
 
-                // Up but dead. Tear it down and try the next MTU on this endpoint.
-                lastVerifyError = "Tunnel came up but no traffic passed"
+                // Up but dead. Tear it down.
                 runCatching { disconnect() }
+                val stage = if (check.handshakeOk) "traffic" else "handshake"
+                val msg = if (check.handshakeOk) {
+                    "The tunnel opened but no data came through"
+                } else {
+                    "The server never answered the handshake"
+                }
                 val a = Attempt(
                     endpoint = endpoint,
-                    probed = true,
+                    probed = probe.reachable,
                     probeLatencyMs = probe.latencyMs,
                     connected = false,
-                    error = "No traffic through the tunnel",
+                    error = msg,
                     mtu = mtu,
                     verified = false,
-                    verifyLatencyMs = verifyMs
+                    verifyLatencyMs = verifyMs,
+                    stage = stage
                 )
                 attempts.add(a)
                 onAttempt?.invoke(a)
+                lastError = msg
+
+                // KEY: only a completed handshake says anything about packet size. When
+                // the handshake itself fails, the endpoint is blocked and walking the MTU
+                // ladder on it just burns the time budget - go straight to the next
+                // endpoint. That is what turns a 24-retry stall into a real failover.
+                if (!check.handshakeOk) break
             }
         }
 
-        val anyProbe = attempts.any { it.probed && it.error == null }
-        val anyUp = attempts.any { it.mtu > 0 && it.error == "No traffic through the tunnel" }
-        val message = when {
-            attempts.isEmpty() -> "No endpoints to try."
-            anyUp -> "The tunnel connected but no traffic passed. This network is blocking " +
-                "the tunnel's data path — try a different network or a fallback port."
-            !anyProbe -> "No WARP endpoint answered from this network. UDP may be blocked — " +
-                "try a different network, or pick a fallback port in Transport."
-            else -> "Endpoints answered but the tunnel would not come up. Last error: " +
-                (lastVerifyError ?: attempts.lastOrNull { it.error != null }?.error ?: "unknown")
+        val kind = when {
+            attempts.isEmpty() -> FailureKind.TIMEOUT
+            sawHandshake -> FailureKind.NO_TRAFFIC
+            sawUp -> FailureKind.NO_HANDSHAKE
+            !sawReachable -> FailureKind.UNREACHABLE
+            else -> FailureKind.BACKEND
         }
-        return Outcome(connected = false, profile = null, attempts = attempts, error = message)
+
+        val message = when (kind) {
+            FailureKind.UNREACHABLE ->
+                "This network is blocking the tunnel. Try mobile data instead of Wi-Fi, " +
+                    "or a different network."
+            FailureKind.NO_HANDSHAKE ->
+                "The server did not respond. Your network may be blocking VPN traffic."
+            FailureKind.NO_TRAFFIC ->
+                "The tunnel opened but no data came through. Try another server."
+            FailureKind.BACKEND ->
+                "The tunnel could not start on this device. Try again."
+            FailureKind.TIMEOUT ->
+                "The connection timed out. Try again, or pick a different server."
+            else -> lastError ?: "Could not connect."
+        }
+
+        return Outcome(
+            connected = false,
+            profile = null,
+            attempts = attempts,
+            error = message,
+            failureKind = kind
+        )
     }
 }

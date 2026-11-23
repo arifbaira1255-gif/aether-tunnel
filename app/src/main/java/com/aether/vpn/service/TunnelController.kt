@@ -101,7 +101,7 @@ object TunnelController {
     }
 
     /**
-     * Brings the tunnel up. Blocking — call from a background dispatcher.
+     * Brings the tunnel up. Blocking - call from a background dispatcher.
      * The caller must already hold VpnService consent (see [prepare]).
      */
     fun connect(context: Context, profile: TunnelProfile) {
@@ -122,7 +122,7 @@ object TunnelController {
         }
     }
 
-    /** Tears the tunnel down. Blocking — call from a background dispatcher. */
+    /** Tears the tunnel down. Blocking - call from a background dispatcher. */
     fun disconnect(context: Context) {
         _state.value = TunnelState.DISCONNECTING
         try {
@@ -145,6 +145,9 @@ object TunnelController {
         val s: Statistics = backendFor(context).getStatistics(tunnelInstance())
         val rx = s.totalRx()
         val tx = s.totalTx()
+        // peers() can be empty while the backend's statistics are still stale (it
+        // refreshes on a timer). An empty peer list is NOT proof that no handshake
+        // happened, so report -1 and let the caller decide.
         val handshake = s.peers().firstOrNull()?.let { key ->
             s.peer(key)?.latestHandshakeEpochMillis() ?: -1L
         } ?: -1L
@@ -188,17 +191,39 @@ object TunnelController {
 
     /**
      * Waits until the peer has completed a handshake, or the timeout expires.
-     * A completed handshake is the proof that the key exchange worked end to end.
+     *
+     * A completed handshake is the strongest proof that the key exchange worked end to
+     * end. But it is not the ONLY proof, and treating it as one was a bug: the backend's
+     * statistics refresh on a timer, so `peers()` can be empty for a second or two after
+     * a perfectly good handshake. Waiting only for the handshake field therefore reported
+     * "no handshake" on tunnels that were working.
+     *
+     * So this accepts EITHER signal:
+     *   - a handshake timestamp within the last 20 seconds, or
+     *   - any byte moving in either direction (a peer that has not handshaked cannot
+     *     send or receive a single byte, so movement is proof the handshake completed).
      */
-    fun awaitHandshake(context: Context, timeoutMs: Long = 4000): Boolean {
+    fun awaitHandshake(context: Context, timeoutMs: Long = 3000): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
+        var firstRx = -1L
+        var firstTx = -1L
         while (System.currentTimeMillis() < deadline) {
             val c = readCounters(context)
-            if (c != null && c.third > 0) {
-                val age = System.currentTimeMillis() - c.third
-                if (age in 0..15_000) return true
+            if (c != null) {
+                val (rx, tx, handshakeEpoch) = c
+                if (handshakeEpoch > 0) {
+                    val age = System.currentTimeMillis() - handshakeEpoch
+                    if (age in 0..20_000) return true
+                }
+                if (firstRx < 0) {
+                    firstRx = rx
+                    firstTx = tx
+                } else if (rx > firstRx || tx > firstTx) {
+                    // Bytes moved: the handshake must have completed.
+                    return true
+                }
             }
-            Thread.sleep(150)
+            Thread.sleep(120)
         }
         return false
     }
@@ -223,4 +248,8 @@ object TunnelController {
         if (s.rxBytes + s.txBytes == 0L && upFor > idleMs) return true
         return false
     }
+
+    /** A one-line snapshot of the backend, for the diagnostics screen. */
+    fun backendVersion(context: Context): String =
+        runCatching { backendFor(context).version }.getOrElse { "unavailable" }
 }

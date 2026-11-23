@@ -148,7 +148,10 @@ object WarpApi {
                     throw IllegalStateException("WARP enable failed (HTTP $code): ${text.take(160)}")
                 }
                 val root = JSONObject(text)
-                reg.copy(warpEnabled = root.optBoolean("warp_enabled", true))
+                // Trust the server's answer, not our assumption. If the PATCH succeeded
+                // but the field is still false, the account is not enabled and the
+                // tunnel will drop every packet - the caller needs to know.
+                reg.copy(warpEnabled = root.optBoolean("warp_enabled", false))
             } finally {
                 conn.disconnect()
             }
@@ -204,6 +207,25 @@ object WarpApi {
         } finally {
             conn.disconnect()
         }
+    }
+
+    /**
+     * True when a cached registration is complete enough to attempt a tunnel.
+     *
+     * A registration that is missing its private key, the peer's public key or the
+     * tunnel address cannot produce a working config, and trying to use one produces a
+     * confusing backend error instead of a clean "register again". So the app checks
+     * this before every connect and re-registers when it fails.
+     */
+    fun isValid(reg: Registration?): Boolean {
+        if (reg == null) return false
+        if (reg.privateKey.isBlank()) return false
+        if (reg.peerPublicKey.isBlank()) return false
+        if (reg.addressV4.isBlank()) return false
+        // A WireGuard key is 32 bytes -> 44 base64 chars ending in '='.
+        if (reg.privateKey.length != 44) return false
+        if (reg.peerPublicKey.length != 44) return false
+        return true
     }
 
     /**

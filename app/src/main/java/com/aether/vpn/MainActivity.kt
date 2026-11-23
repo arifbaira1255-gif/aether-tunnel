@@ -55,6 +55,7 @@ import com.aether.vpn.ui.AppState
 import com.aether.vpn.ui.components.AmbientBackground
 import com.aether.vpn.ui.components.clickableNoRipple
 import com.aether.vpn.ui.screens.ConnectScreen
+import com.aether.vpn.ui.screens.DiagnosticsScreen
 import com.aether.vpn.ui.screens.ServerListScreen
 import com.aether.vpn.ui.screens.SettingsScreen
 import com.aether.vpn.ui.screens.StatsScreen
@@ -115,25 +116,42 @@ class MainActivity : ComponentActivity() {
                             .statusBarsPadding()
                     ) {
                         Box(Modifier.weight(1f)) {
-                            when (tab) {
-                                0 -> ConnectScreen(
+                            // The diagnostics screen is a modal overlay, not a tab: the
+                            // user only reaches it from the Troubleshoot button that
+                            // appears after a failed connect.
+                            if (app.showDiagnostics) {
+                                DiagnosticsScreen(
                                     app = app,
-                                    onOpenServers = { tab = 1 },
-                                    onConnect = { requestConnect(scope) },
-                                    onDisconnect = { app.disconnect(scope) }
+                                    onBack = { app.closeDiagnostics() },
+                                    onRetry = {
+                                        app.closeDiagnostics()
+                                        requestConnect(scope)
+                                    }
                                 )
-                                1 -> ServerListScreen(app) { loc ->
-                                    // One tap: remember the location, then connect through the
-                                    // normal path so the VPN permission is requested first.
-                                    app.selectLocation(loc)
-                                    tab = 0
-                                    requestConnect(scope)
+                            } else {
+                                when (tab) {
+                                    0 -> ConnectScreen(
+                                        app = app,
+                                        onOpenServers = { tab = 1 },
+                                        onConnect = { requestConnect(scope) },
+                                        onDisconnect = { app.disconnect(scope) },
+                                        onTroubleshoot = { app.openDiagnostics() }
+                                    )
+                                    1 -> ServerListScreen(app) { loc ->
+                                        // One tap: remember the location, then connect through
+                                        // the normal path so the VPN permission is asked first.
+                                        app.selectLocation(loc)
+                                        tab = 0
+                                        requestConnect(scope)
+                                    }
+                                    2 -> StatsScreen(app)
+                                    else -> SettingsScreen(app)
                                 }
-                                2 -> StatsScreen(app)
-                                else -> SettingsScreen(app)
                             }
                         }
-                        BottomBar(tab, connected) { tab = it }
+                        if (!app.showDiagnostics) {
+                            BottomBar(tab, connected) { tab = it }
+                        }
                     }
                 }
             }

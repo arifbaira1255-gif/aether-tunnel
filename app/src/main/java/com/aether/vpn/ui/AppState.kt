@@ -6,6 +6,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.aether.vpn.core.Carrier
+import com.aether.vpn.core.DiagnosticReport
+import com.aether.vpn.core.DiagnosticStep
 import com.aether.vpn.core.Endpoint
 import com.aether.vpn.core.LiveStats
 import com.aether.vpn.core.Location
@@ -36,6 +38,10 @@ import kotlinx.coroutines.withContext
 class AppState(private val context: Context) {
 
     val store = AppStore(context)
+
+    private val APP_VERSION: String = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+    }.getOrElse { "?" }
 
     var state by mutableStateOf(TunnelState.DISCONNECTED)
         private set
@@ -71,6 +77,20 @@ class AppState(private val context: Context) {
     /** Round-trip time of that verification request, in ms. */
     var verifiedLatencyMs by mutableStateOf(0L)
         private set
+
+    /**
+     * The record of the last connect attempt. Shown only on the diagnostics screen, which
+     * the user reaches from the "Troubleshoot" button that appears after a failure.
+     */
+    var diagnostics by mutableStateOf(DiagnosticReport())
+        private set
+
+    /** True while the diagnostics screen is open. */
+    var showDiagnostics by mutableStateOf(false)
+        private set
+
+    fun openDiagnostics() { showDiagnostics = true }
+    fun closeDiagnostics() { showDiagnostics = false }
 
     val speed = SpeedHistory(60)
     var speedTick by mutableStateOf(0L)
@@ -188,15 +208,39 @@ class AppState(private val context: Context) {
 
     // ---- probing -----------------------------------------------------------
 
+    /**
+     * Measures every edge once, in parallel, and caches the results.
+     *
+     * The pool is 40 addresses x 8 ports = 320 entries. Probing them one at a time at a
+     * 1.5 s timeout would take eight minutes, so this probes the 40 distinct ADDRESSES
+     * concurrently (port 443, one socket each) and stores the latency against every port
+     * of that address. The edge is the thing with a distance; the port is just a door.
+     */
     fun probeAll(scope: CoroutineScope) {
         if (probing) return
         probing = true
         scope.launch {
-            val results = withContext(Dispatchers.IO) {
-                TunnelProbe.probeAll(TransportCatalog.endpoints, timeoutMs = 900)
+            val reachable = withContext(Dispatchers.IO) {
+                val hosts = TransportCatalog.endpoints.map { it.host }.distinct()
+                val byHost = HashMap<String, Long>(hosts.size)
+                val threads = hosts.map { host ->
+                    Thread {
+                        val sample = TransportCatalog.endpoints.first { it.host == host }
+                        val r = TunnelProbe.probe(sample, timeoutMs = 2500)
+                        if (r.reachable) synchronized(byHost) { byHost[host] = r.latencyMs }
+                    }.apply { isDaemon = true; start() }
+                }
+                val deadline = System.currentTimeMillis() + 12_000
+                threads.forEach { t ->
+                    val left = (deadline - System.currentTimeMillis()).coerceAtLeast(1)
+                    runCatching { t.join(left) }
+                }
+                val out = HashMap<String, Long>()
+                TransportCatalog.endpoints.forEach { e ->
+                    byHost[e.host]?.let { out[e.key] = it }
+                }
+                out
             }
-            val reachable = results.filter { it.reachable }
-                .associate { it.endpoint.key to it.latencyMs }
             probeResults = reachable
             store.saveProbeResults(reachable)
             probing = false
@@ -217,6 +261,15 @@ class AppState(private val context: Context) {
     // ---- registration ------------------------------------------------------
 
     suspend fun ensureRegistration(): WarpApi.Registration? {
+        // A cached registration that is incomplete (missing key, missing peer key,
+        // missing address) cannot produce a working config. Trying to use one gives a
+        // confusing backend error, so it is discarded and a fresh device is registered.
+        val cached = registration
+        if (cached != null && !WarpApi.isValid(cached)) {
+            store.clearRegistration()
+            registration = null
+        }
+
         // Re-enable WARP routing on every connect. The call is idempotent, and a device
         // that registered on an earlier install (or whose enable call failed) would
         // otherwise stay disabled and drop every packet - the classic "connected but
@@ -231,6 +284,7 @@ class AppState(private val context: Context) {
                     .getOrDefault(existing)
             }
         }
+
         return withContext(Dispatchers.IO) {
             runCatching { WarpApi.register() }
                 .onSuccess {
@@ -258,34 +312,90 @@ class AppState(private val context: Context) {
         attempts = emptyList()
         trafficVerified = false
         verifiedLatencyMs = 0L
-        failoverNote = "Registering with the WARP edge…"
+        failoverNote = "Connecting\u2026"
+        val startedAt = System.currentTimeMillis()
+        val steps = ArrayList<DiagnosticStep>()
+
         scope.launch {
+            // ---- 1. Registration ------------------------------------------
+            val regStart = System.currentTimeMillis()
             val reg = ensureRegistration()
+            val regMs = System.currentTimeMillis() - regStart
             if (reg == null) {
+                steps.add(
+                    DiagnosticStep(
+                        "Register with the server network",
+                        DiagnosticStep.Status.FAIL,
+                        error ?: "The registration request did not complete",
+                        regMs
+                    )
+                )
+                diagnostics = DiagnosticReport(
+                    steps = steps,
+                    failureKind = "REGISTRATION",
+                    userMessage = "Could not reach the server network. Check your internet " +
+                        "connection and try again.",
+                    appVersion = APP_VERSION,
+                    backendVersion = TunnelController.backendVersion(context),
+                    startedAt = startedAt,
+                    finishedAt = System.currentTimeMillis()
+                )
+                error = "Could not reach the server network. Check your internet connection " +
+                    "and try again."
                 busy = false
                 state = TunnelState.ERROR
                 failoverNote = null
                 return@launch
             }
+            steps.add(
+                DiagnosticStep(
+                    "Register with the server network",
+                    DiagnosticStep.Status.PASS,
+                    if (reg.warpEnabled) "Account enabled for routing" else
+                        "Account registered (routing flag not confirmed)",
+                    regMs
+                )
+            )
 
+            // ---- 2. Tunnel + traffic --------------------------------------
             state = TunnelState.CONNECTING
-            failoverNote = "Probing endpoints…"
+            failoverNote = "Finding the best server\u2026"
             val preferred = store.selectedEndpoint()
             val cfg = transport
             val collected = ArrayList<FailoverEngine.Attempt>()
+            var handshakeSeen = false
+            var trafficSeen = false
+            var lastVerifyDetail = ""
 
             // Two gates: the peer must have completed a handshake, and a real request
             // must come back. Either alone gives a false green.
-            val verifyFn: (() -> Boolean)? = if (cfg.verifyTraffic) {
+            val verifyFn: (() -> FailoverEngine.Verify)? = if (cfg.verifyTraffic) {
                 {
-                    val handshake = TunnelController.awaitHandshake(context, 5000)
-                    handshake && ConnectivityVerifier.check(timeoutMs = 6000).ok
+                    // Two independent facts. The handshake says the endpoint is reachable
+                    // and the keys agree; the request says data actually flows. Reporting
+                    // them separately is what lets the engine tell "blocked server" apart
+                    // from "packet size too big", and therefore what to try next.
+                    val handshake = TunnelController.awaitHandshake(context, 4000)
+                    if (handshake) handshakeSeen = true
+                    val check = ConnectivityVerifier.check(timeoutMs = 5000, rounds = 2)
+                    if (check.ok) {
+                        trafficSeen = true
+                        lastVerifyDetail = check.detail
+                    } else if (lastVerifyDetail.isBlank()) {
+                        lastVerifyDetail = check.detail
+                    }
+                    FailoverEngine.Verify(
+                        handshakeOk = handshake,
+                        trafficOk = check.ok,
+                        detail = check.detail
+                    )
                 }
             } else {
                 null
             }
 
             val loc = selectedLocation()
+            val tunnelStart = System.currentTimeMillis()
             val outcome = withContext(Dispatchers.IO) {
                 FailoverEngine.run(
                     config = cfg,
@@ -301,7 +411,9 @@ class AppState(private val context: Context) {
                     connect = { profile -> TunnelController.connect(context, profile) },
                     disconnect = { runCatching { TunnelController.disconnect(context) } },
                     verify = verifyFn,
-                    maxAttempts = if (cfg.autoFailover) 12 else 1,
+                    maxAttempts = if (cfg.autoFailover) 24 else 1,
+                    budgetMs = 75_000,
+                    latencies = probeResults,
                     onAttempt = { attempt ->
                         collected.add(attempt)
                         // Publish progress as it happens, not only at the end.
@@ -309,15 +421,46 @@ class AppState(private val context: Context) {
                         // The user sees progress, never an address.
                         failoverNote = when {
                             attempt.connected -> "Connected"
-                            attempt.mtu > 0 -> "Optimising the tunnel…"
-                            else -> "Trying the next server…"
+                            attempt.stage == "traffic" -> "Optimising the tunnel\u2026"
+                            else -> "Trying the next server\u2026"
                         }
                     }
                 )
             }
+            val tunnelMs = System.currentTimeMillis() - tunnelStart
 
             attempts = collected.toList()
             failoverNote = if (outcome.connected) null else failoverNote
+
+            // ---- 3. Record what happened ----------------------------------
+            val upCount = collected.count { it.mtu > 0 }
+            steps.add(
+                DiagnosticStep(
+                    "Open the tunnel",
+                    if (upCount > 0) DiagnosticStep.Status.PASS else DiagnosticStep.Status.FAIL,
+                    if (upCount > 0) "$upCount combination(s) came up" else
+                        "The tunnel never came up on any server",
+                    tunnelMs
+                )
+            )
+            steps.add(
+                DiagnosticStep(
+                    "Complete the key exchange",
+                    if (handshakeSeen || outcome.connected) DiagnosticStep.Status.PASS
+                    else DiagnosticStep.Status.FAIL,
+                    if (handshakeSeen || outcome.connected) "Handshake completed"
+                    else "The server never answered the handshake"
+                )
+            )
+            steps.add(
+                DiagnosticStep(
+                    "Carry real traffic",
+                    if (trafficSeen || outcome.connected) DiagnosticStep.Status.PASS
+                    else DiagnosticStep.Status.FAIL,
+                    if (trafficSeen || outcome.connected) "A real request came back"
+                    else lastVerifyDetail.ifBlank { "No request came back through the tunnel" }
+                )
+            )
 
             if (outcome.connected && outcome.profile != null) {
                 activeProfile = outcome.profile
@@ -338,10 +481,33 @@ class AppState(private val context: Context) {
                 startPolling(scope)
                 startNotification(scope)
                 if (cfg.watchdog) startWatchdog(scope)
+
+                diagnostics = DiagnosticReport(
+                    steps = steps,
+                    failureKind = "",
+                    userMessage = "",
+                    appVersion = APP_VERSION,
+                    backendVersion = TunnelController.backendVersion(context),
+                    startedAt = startedAt,
+                    finishedAt = System.currentTimeMillis(),
+                    combinationsTried = collected.size,
+                    workingMtu = outcome.mtu,
+                    workingPort = outcome.profile.endpointPort
+                )
             } else {
                 error = outcome.error
                 state = TunnelState.ERROR
                 TunnelNotification.cancel(context)
+                diagnostics = DiagnosticReport(
+                    steps = steps,
+                    failureKind = outcome.failureKind.name,
+                    userMessage = outcome.error ?: "",
+                    appVersion = APP_VERSION,
+                    backendVersion = TunnelController.backendVersion(context),
+                    startedAt = startedAt,
+                    finishedAt = System.currentTimeMillis(),
+                    combinationsTried = collected.size
+                )
             }
             busy = false
         }

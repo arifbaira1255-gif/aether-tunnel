@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Shield
@@ -72,7 +73,8 @@ fun ConnectScreen(
     app: AppState,
     onOpenServers: () -> Unit,
     onConnect: () -> Unit,
-    onDisconnect: () -> Unit
+    onDisconnect: () -> Unit,
+    onTroubleshoot: () -> Unit
 ) {
     val connected = app.state == TunnelState.CONNECTED
     val connecting = app.state == TunnelState.CONNECTING
@@ -398,17 +400,43 @@ fun ConnectScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Connection failed",
+                            "Couldn't connect",
                             style = MaterialTheme.typography.titleMedium,
                             color = Rose
                         )
                     }
                     Spacer(Modifier.height(8.dp))
+                    // Plain language, no jargon: what happened, in one sentence.
                     Text(
                         app.error ?: "",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondary
                     )
+                    Spacer(Modifier.height(14.dp))
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(Color.White.copy(alpha = 0.05f))
+                            .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(13.dp))
+                            .clickableNoRipple(onTroubleshoot)
+                            .padding(vertical = 12.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Rounded.BugReport, null,
+                            tint = TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            "Troubleshoot",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = TextSecondary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
         }
